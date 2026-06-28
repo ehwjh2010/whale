@@ -521,6 +521,22 @@ func (a *Agent) resolveToolApproval(ctx context.Context, sc streamDispatchContex
 	if !decision.RequiresApproval {
 		return result, nil
 	}
+	// Auto-allow read_file / grep / search_files when they operate inside the
+	// current session's tool-results archive directory. The tool execution
+	// layer already enforces this scope via WithToolResultReadRoots; this
+	// check prevents the user-facing approval dialog from appearing for
+	// paths that will be allowed anyway.
+	//
+	// The decision's ApprovalRequirements list carries every permission kind
+	// (including "read" for audit), but the Permission field records the
+	// specific kind whose "ask" action triggered RequiresApproval.  We only
+	// bypass when that kind is external_directory and the target path lives
+	// inside the current session's tool-results directory.
+	if isToolResultReadTool(call.Name) &&
+		decision.Permission == "external_directory" &&
+		a.isToolResultReadPath(sc.SessionID, call) {
+		return result, nil
+	}
 	keys := policy.ApprovalKeysForDecision(call, decision)
 	key := policy.ApprovalKey(call)
 	if len(keys) > 0 {
