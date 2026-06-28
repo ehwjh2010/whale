@@ -16,6 +16,7 @@ func (s *Service) emitSessionHydratedWithMetadata(metadata map[string]any) {
 		Messages:        protocolMessages(msgs),
 		AutoAccept:      s.app.AutoAcceptPermissions(),
 		AutoAcceptKnown: true,
+		AutoReview:      s.app.AutoReviewEnabled(),
 		Metadata:        metadata,
 		Plugins:         protocolPlugins(s.PluginsForManager()),
 	})

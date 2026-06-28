@@ -71,7 +71,7 @@ func (s *Service) handleSubmitMenuCommand(state *submitState) bool {
 		})
 		return true
 	case "/permissions":
-		s.emit(Event{Kind: EventPermissionsSelectionRequested, AutoAccept: s.app.AutoAcceptPermissions(), AutoAcceptKnown: true})
+		s.emit(Event{Kind: EventPermissionsSelectionRequested, AutoAccept: s.app.AutoAcceptPermissions(), AutoAcceptKnown: true, AutoReview: s.app.AutoReviewEnabled()})
 		return true
 	case "/focus":
 		mode, err := s.app.ToggleViewMode()

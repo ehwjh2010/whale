@@ -256,18 +256,24 @@ func (m *model) handlePermissionsMenuKey(msg tea.KeyMsg) tea.Cmd {
 			m.permissionsMenu.selected--
 		}
 	case "down", "j", "right", "l", "tab":
-		if m.permissionsMenu.selected < 2 {
+		if m.permissionsMenu.selected < 3 {
 			m.permissionsMenu.selected++
 		}
 	case "enter":
-		selectedAutoAccept := m.permissionsMenu.selected == 0
-		selectedAsk := m.permissionsMenu.selected == 1
-		if (selectedAutoAccept || selectedAsk) && selectedAutoAccept != m.permissionsMenu.autoAccept {
-			mode := "ask"
-			if selectedAutoAccept {
-				mode = "auto_accept"
+		current := permissionsMode(m.autoAccept, m.autoReviewEnabled)
+		switch m.permissionsMenu.selected {
+		case 0: // Ask for approval
+			if current != "ask" {
+				m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "ask"})
 			}
-			m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: mode})
+		case 1: // Auto-review
+			if current != "auto-review" {
+				m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetAutoReview, AutoReview: true})
+			}
+		case 2: // Auto-accept edits
+			if current != "auto-accept" {
+				m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "auto_accept"})
+			}
 		}
 		m.mode = modeChat
 	}

@@ -51,7 +51,33 @@ func (a *App) SetAutoAcceptPermissions(enabled bool) {
 	a.autoAcceptPermissions = enabled
 	a.approvalMu.Unlock()
 	a.cfg.AutoAcceptPermissions = enabled
+	// Any explicit auto-accept change (including enabling) also disables
+	// auto-review — the permissions menu is mutually exclusive. SetAutoReviewEnabled
+	// re-enables auto-review AFTER this call so ordering is safe.
+	a.cfg.AutoReviewEnabled = false
 	a.resetAgent()
+}
+
+func (a *App) AutoReviewEnabled() bool {
+	if a == nil {
+		return false
+	}
+	return a.cfg.AutoReviewEnabled
+}
+
+func (a *App) SetAutoReviewEnabled(enabled bool) {
+	if enabled {
+		// Auto-review subsumes auto-accept. Set auto-accept first (this also
+		// resets AutoReviewEnabled=false), then override back to true.
+		a.SetAutoAcceptPermissions(true)
+	}
+	a.cfg.AutoReviewEnabled = enabled
+	if a.a != nil && a.a.Classifier() != nil {
+		a.a.Classifier().SetEnabled(enabled)
+	}
+	if !enabled {
+		a.resetAgent()
+	}
 }
 func (a *App) WorkspaceRoot() string   { return a.workspaceRoot }
 func (a *App) Model() string           { return a.model }

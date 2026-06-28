@@ -58,63 +58,87 @@ func TestPickerEventsClearBusyState(t *testing.T) {
 	}
 }
 func TestPermissionsMenuRendersStateAndDispatchesExplicitMode(t *testing.T) {
+	// Open with "ask" mode (default)
 	m, intents := newModelWithDispatchSpy()
-	next, _ := m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false}))
+	next, _ := m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false, AutoReview: false}))
 	m = next.(model)
 	if m.mode != modePermissionsMenu {
 		t.Fatalf("expected permissions menu mode, got %v", m.mode)
 	}
-	rendered := m.renderPermissionsMenu()
-	plain := xansi.Strip(rendered)
-	if !strings.Contains(plain, "  auto-accept: on") || !strings.Contains(plain, "> auto-accept: off (current)") || !strings.Contains(plain, "  cancel") {
-		t.Fatalf("unexpected permissions menu:\n%s", rendered)
+	// Enter on current selection (ask) should not dispatch
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if len(*intents) != 0 || m.mode != modeChat {
+		t.Fatalf("current ask selection should not dispatch, intents=%+v mode=%v", *intents, m.mode)
 	}
 
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	// Open with "ask" mode, down to auto-review (index 1), enter → dispatch auto_review
+	m, intents = newModelWithDispatchSpy()
+	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false, AutoReview: false}))
+	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if m.mode != modeChat {
 		t.Fatalf("expected chat mode after selection, got %v", m.mode)
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetApprovalMode || (*intents)[0].ApprovalMode != "auto_accept" {
-		t.Fatalf("unexpected dispatched intent: %+v", *intents)
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetAutoReview || (*intents)[0].AutoReview != true {
+		t.Fatalf("expected auto_review intent, got intents=%+v", *intents)
 	}
 
+	// Open with auto-review mode (selected=1), down to auto-accept (index 2), enter → dispatch auto_accept
 	m, intents = newModelWithDispatchSpy()
-	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: true}))
+	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: true, AutoReview: true}))
 	m = next.(model)
-	rendered = m.renderPermissionsMenu()
-	plain = xansi.Strip(rendered)
-	if !strings.Contains(plain, "> auto-accept: on (current)") || !strings.Contains(plain, "  auto-accept: off") || !strings.Contains(plain, "  cancel") {
-		t.Fatalf("unexpected enabled permissions menu:\n%s", rendered)
+	m.autoAccept = true
+	m.autoReviewEnabled = true
+	if m.permissionsMenu.selected != 1 {
+		t.Fatalf("expected auto-review selected=1, got %d", m.permissionsMenu.selected)
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetApprovalMode || (*intents)[0].ApprovalMode != "auto_accept" {
+		t.Fatalf("expected auto_accept intent, got intents=%+v", *intents)
+	}
+
+	// Open with auto-review mode (selected=1), up to ask (index 0), enter → dispatch ask
+	m, intents = newModelWithDispatchSpy()
+	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: true, AutoReview: true}))
+	m = next.(model)
+	m.autoAccept = true
+	m.autoReviewEnabled = true
+	if m.permissionsMenu.selected != 1 {
+		t.Fatalf("expected auto-review selected=1, got %d", m.permissionsMenu.selected)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(model)
+	if m.permissionsMenu.selected != 0 {
+		t.Fatalf("expected ask selected=0 after up, got %d", m.permissionsMenu.selected)
+	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetApprovalMode || (*intents)[0].ApprovalMode != "ask" {
-		t.Fatalf("unexpected dispatched intent: %+v", *intents)
+		t.Fatalf("expected ask intent, got intents=%+v autoAccept=%v autoReview=%v selected=%d", *intents, m.autoAccept, m.autoReviewEnabled, m.permissionsMenu.selected)
 	}
 
+	// Cancel at index 3 should not dispatch
 	m, intents = newModelWithDispatchSpy()
-	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false}))
+	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false, AutoReview: false}))
 	m = next.(model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// down x3 to cancel (index 3)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
-	if len(*intents) != 0 || m.mode != modeChat {
-		t.Fatalf("current selection should not dispatch and should return to chat, intents=%+v mode=%v", *intents, m.mode)
-	}
-
-	m, intents = newModelWithDispatchSpy()
-	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false}))
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(model)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = next.(model)
 	if len(*intents) != 0 || m.mode != modeChat {
-		t.Fatalf("cancel should not dispatch and should return to chat, intents=%+v mode=%v", *intents, m.mode)
+		t.Fatalf("cancel should not dispatch, intents=%+v mode=%v", *intents, m.mode)
 	}
 }
 func TestPermissionsMenuUsesSegmentedPickerStyles(t *testing.T) {
@@ -124,13 +148,15 @@ func TestPermissionsMenuUsesSegmentedPickerStyles(t *testing.T) {
 
 	m := newModel(nil, "", "", "")
 	m.mode = modePermissionsMenu
-	m.permissionsMenu.selected = 1
+	m.autoAccept = true
+	m.autoReviewEnabled = false
+	m.permissionsMenu.selected = 2
 	rendered := m.renderPermissionsMenu()
 	if !strings.Contains(rendered, "\x1b[") {
 		t.Fatalf("expected styled permissions menu, got:\n%s", rendered)
 	}
 	plain := xansi.Strip(rendered)
-	for _, want := range []string{"Permissions", "  auto-accept: on", "> auto-accept: off (current)", "  cancel"} {
+	for _, want := range []string{"Permissions", "Ask for approval", "Auto-review", "> Auto-accept edits (current)", "cancel"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("expected plain menu to contain %q, got:\n%s", want, plain)
 		}
@@ -941,7 +967,7 @@ func TestPickerAndModalViewsHideComposer(t *testing.T) {
 				m.mode = modePermissionsMenu
 				m.permissionsMenu.selected = 1
 			},
-			want: "auto-accept: off (current)",
+			want: "Auto-review",
 		},
 		{
 			name: "plan implementation picker",

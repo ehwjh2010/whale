@@ -59,6 +59,12 @@ type Config struct {
 	WorkflowKeywordTrigger         bool
 	WorkflowKeywordTriggerExplicit bool
 	TrustedWorkflows               []string
+	AutoReviewEnabled              bool
+	AutoReviewModel                string
+	AutoReviewTimeoutMS            int
+	AutoReviewAllowRules           []string
+	AutoReviewDenyRules            []string
+	AutoReviewEnvironment          []string
 	configDefaulted                bool
 }
 

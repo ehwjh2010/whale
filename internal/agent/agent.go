@@ -71,6 +71,7 @@ const (
 	AgentEventTypeSubagentStarted        AgentEventType = "subagent_started"
 	AgentEventTypeTaskProgress           AgentEventType = "task_progress"
 	AgentEventTypeSubagentDone           AgentEventType = "subagent_completed"
+	AgentEventTypeClassifierReview       AgentEventType = "classifier_review"
 	AgentEventTypeDone                   AgentEventType = "done"
 	AgentEventTypeError                  AgentEventType = "error"
 )
@@ -149,6 +150,7 @@ type AgentEvent struct {
 	Hook           *HookEventInfo
 	Task           *TaskActivityInfo
 	PlanUpdate     *PlanUpdateInfo
+	Classifier     *ClassifierReviewEvent
 	ToolCall       *core.ToolCall
 	UserInputReq   *core.UserInputRequest
 	UserInputResp  *core.UserInputResponse
@@ -265,6 +267,7 @@ type Agent struct {
 	contextWindow          int
 	recovery               RecoveryPolicy
 	hooks                  *HookRunner
+	classifier             *Classifier
 	projectMemoryEnabled   bool
 	projectMemoryMaxChars  int
 	projectMemoryFileOrder []string
@@ -357,6 +360,7 @@ func NewAgent(provider llm.Provider, store store.MessageStore, tools []core.Tool
 		contextWindow:          defaults.DefaultContextWindow,
 		recovery:               DefaultRecoveryPolicy(),
 		hooks:                  NewHookRunner(nil, ""),
+		classifier:             NewClassifier(DefaultClassifierConfig()),
 		projectMemoryEnabled:   true,
 		projectMemoryMaxChars:  defaults.DefaultMemoryMaxChars,
 		projectMemoryFileOrder: defaults.DefaultMemoryFileOrder(),
@@ -388,6 +392,7 @@ func NewAgentWithRegistry(provider llm.Provider, store store.MessageStore, tools
 		contextWindow:          defaults.DefaultContextWindow,
 		recovery:               DefaultRecoveryPolicy(),
 		hooks:                  NewHookRunner(nil, ""),
+		classifier:             NewClassifier(DefaultClassifierConfig()),
 		projectMemoryEnabled:   true,
 		projectMemoryMaxChars:  defaults.DefaultMemoryMaxChars,
 		projectMemoryFileOrder: defaults.DefaultMemoryFileOrder(),
@@ -647,6 +652,21 @@ func WithMaxParallelSubagents(maxParallel int) AgentOption {
 			a.maxParallelSubagents = maxParallel
 		}
 	}
+}
+
+// WithClassifierConfig sets the auto-review classifier configuration.
+func WithClassifierConfig(cfg ClassifierConfig) AgentOption {
+	return func(a *Agent) {
+		a.classifier = NewClassifier(cfg)
+	}
+}
+
+// Classifier returns the auto-review classifier for runtime toggle.
+func (a *Agent) Classifier() *Classifier {
+	if a == nil {
+		return nil
+	}
+	return a.classifier
 }
 
 func (a *Agent) RunSession(ctx context.Context, sessionID, input string) (core.Message, error) {

@@ -18,6 +18,7 @@ const (
 	IntentSetModelAndEffort         IntentKind = "set_model_and_effort"
 	IntentSetApprovalMode           IntentKind = "set_approval_mode"
 	IntentEnableAutoAccept          IntentKind = "enable_auto_accept"
+	IntentSetAutoReview             IntentKind = "set_auto_review"
 	IntentSetViewMode               IntentKind = "set_view_mode"
 	IntentToggleMode                IntentKind = "toggle_mode"
 	IntentImplementPlan             IntentKind = "implement_plan"
@@ -52,6 +53,7 @@ type Intent struct {
 	Effort             string                `json:"effort,omitempty"`
 	Thinking           string                `json:"thinking,omitempty"`
 	ApprovalMode       string                `json:"approval_mode,omitempty"`
+	AutoReview         bool                  `json:"auto_review,omitempty"`
 	ViewMode           string                `json:"view_mode,omitempty"`
 	SkillName          string                `json:"skill_name,omitempty"`
 	SkillEnabled       bool                  `json:"skill_enabled,omitempty"`

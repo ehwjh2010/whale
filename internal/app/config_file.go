@@ -38,6 +38,7 @@ type FileConfig struct {
 	Skills       FileSkillsConfig              `toml:"skills,omitempty"`
 	Plugins      FilePluginsConfig             `toml:"plugins,omitempty"`
 	Workflows    FileWorkflowsConfig           `toml:"workflows,omitempty"`
+	AutoReview   FileAutoReviewConfig          `toml:"auto_review,omitempty"`
 	Hooks        map[string][]agent.HookConfig `toml:"hooks,omitempty"`
 }
 
@@ -195,6 +196,15 @@ type FileWorkflowsConfig struct {
 	Enabled               *bool    `toml:"enabled,omitempty"`
 	KeywordTriggerEnabled *bool    `toml:"keyword_trigger_enabled,omitempty"`
 	Trusted               []string `toml:"trusted,omitempty"`
+}
+
+type FileAutoReviewConfig struct {
+	Enabled     *bool    `toml:"enabled,omitempty"`
+	Model       string   `toml:"model,omitempty"`
+	TimeoutMS   int      `toml:"timeout_ms,omitempty"`
+	AllowRules  []string `toml:"allow_rules,omitempty"`
+	DenyRules   []string `toml:"deny_rules,omitempty"`
+	Environment []string `toml:"environment,omitempty"`
 }
 
 type LoadedConfig struct {

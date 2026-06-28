@@ -145,6 +145,24 @@ func ApplyFileConfig(cfg *Config, file FileConfig) error {
 	if len(file.Workflows.Trusted) > 0 {
 		cfg.TrustedWorkflows = mergeNames(cfg.TrustedWorkflows, file.Workflows.Trusted)
 	}
+	if file.AutoReview.Enabled != nil {
+		cfg.AutoReviewEnabled = *file.AutoReview.Enabled
+	}
+	if file.AutoReview.Model != "" {
+		cfg.AutoReviewModel = file.AutoReview.Model
+	}
+	if file.AutoReview.TimeoutMS > 0 {
+		cfg.AutoReviewTimeoutMS = file.AutoReview.TimeoutMS
+	}
+	if len(file.AutoReview.AllowRules) > 0 {
+		cfg.AutoReviewAllowRules = append(cfg.AutoReviewAllowRules, file.AutoReview.AllowRules...)
+	}
+	if len(file.AutoReview.DenyRules) > 0 {
+		cfg.AutoReviewDenyRules = append(cfg.AutoReviewDenyRules, file.AutoReview.DenyRules...)
+	}
+	if len(file.AutoReview.Environment) > 0 {
+		cfg.AutoReviewEnvironment = append(cfg.AutoReviewEnvironment, file.AutoReview.Environment...)
+	}
 	return nil
 }
 

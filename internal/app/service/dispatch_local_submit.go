@@ -66,7 +66,7 @@ func (s *Service) handleLocalSubmit(line string) {
 		return
 	}
 	if line == "/permissions" {
-		s.emit(Event{Kind: EventPermissionsSelectionRequested, AutoAccept: s.app.AutoAcceptPermissions(), AutoAcceptKnown: true})
+		s.emit(Event{Kind: EventPermissionsSelectionRequested, AutoAccept: s.app.AutoAcceptPermissions(), AutoAcceptKnown: true, AutoReview: s.app.AutoReviewEnabled()})
 		return
 	}
 	if line == "/focus" {

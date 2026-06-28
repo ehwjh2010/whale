@@ -131,6 +131,11 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 		if a.repairer != nil {
 			a.repairer.resetStorm()
 		}
+		// Reset classifier circuit breaker at the start of every user turn
+		// so denials from a previous task don't trigger a false interrupt.
+		if a.classifier != nil {
+			a.classifier.ClearTurn(sessionID)
+		}
 		emit := func(ev AgentEvent) bool {
 			return sendAgentEvent(ctx, out, ev)
 		}
@@ -289,8 +294,8 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				} else {
 					consecutiveRedundantRounds = 0
 				}
-				loopDetected := consecutiveStormRounds >= maxConsecutiveStormRounds ||
-					consecutiveRedundantRounds >= maxConsecutiveRedundantRounds
+			loopDetected := consecutiveStormRounds >= maxConsecutiveStormRounds ||
+				consecutiveRedundantRounds >= maxConsecutiveRedundantRounds
 				// In Plan mode, a spinning turn never ends on its own, so the
 				// end-of-turn finalization can't reach it. Before the runaway-loop
 				// guard terminates planning with a contentless force-summary, give
@@ -319,6 +324,22 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				if consecutiveRedundantRounds >= maxConsecutiveRedundantRounds {
 					a.forceSummaryAndFinish(ctx, sessionID, history, "redundant tool-call loop (no progress) detected", summaryRequestContextFromPrefix(rt.Prefix, rt.RuntimeBlocks()), emit)
 					return
+				}
+				// When the classifier circuit breaker fires after too many
+				// blocked actions, inject a visible nudge so the user sees
+				// what's happening and the model is reminded to self-correct.
+				// Translated from Claude Code's auto-mode denial-tracking
+				// fallback to ASK.
+				if a.classifier != nil && a.classifier.IsInterrupted(sessionID) {
+					a.classifier.ClearTurn(sessionID)
+					nudge, err := a.persistClassifierCircuitBreakerNudge(ctx, sessionID)
+					if err != nil {
+						emit(AgentEvent{Type: AgentEventTypeError, Err: err})
+						return
+					}
+					rt.Log.Append(nudge)
+					history = append(history, nudge)
+					continue
 				}
 				if a.maxTurns > 0 && modelTurns >= a.maxTurns {
 					a.forceSummaryAndFinish(ctx, sessionID, history, "turn cap reached", summaryRequestContextFromPrefix(rt.Prefix, rt.RuntimeBlocks()), emit)
