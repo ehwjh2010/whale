@@ -121,6 +121,7 @@ type model struct {
 	showReasoning          bool
 	chatMode               string
 	autoAccept             bool
+	autoReviewEnabled      bool
 	product                string
 	version                string
 	cwd                    string
@@ -212,8 +213,7 @@ type model struct {
 		thinkIx   int
 	}
 	permissionsMenu struct {
-		autoAccept bool
-		selected   int
+		selected int
 	}
 	worktreeExit struct {
 		summary  protocol.WorktreeExitSummary

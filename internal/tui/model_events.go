@@ -62,6 +62,7 @@ func metadataString(v any) string {
 func (m *model) handleServiceEvent(ev protocol.Event) (tea.Cmd, bool, bool) {
 	if ev.AutoAcceptKnown {
 		m.autoAccept = ev.AutoAccept
+		m.autoReviewEnabled = ev.AutoReview
 	}
 	if action, ok := uiActionFromServiceEvent(ev); ok {
 		return m.handleUIAction(action)

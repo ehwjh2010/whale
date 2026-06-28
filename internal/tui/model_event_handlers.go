@@ -486,11 +486,13 @@ func (m *model) handlePermissionsMenuEvent(ev protocol.Event) {
 	m.stopBusy()
 	m.stopping = false
 	m.mode = modePermissionsMenu
-	m.permissionsMenu.autoAccept = ev.AutoAccept
-	if ev.AutoAccept {
-		m.permissionsMenu.selected = 0
-	} else {
+	switch permissionsMode(ev.AutoAccept, ev.AutoReview) {
+	case "auto-review":
 		m.permissionsMenu.selected = 1
+	case "auto-accept":
+		m.permissionsMenu.selected = 2
+	default:
+		m.permissionsMenu.selected = 0
 	}
 	m.slash.matches = nil
 	m.slash.selected = 0

@@ -2,11 +2,12 @@ package service
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/session"
-	"strings"
 )
 
 func (s *Service) Dispatch(in Intent) {
@@ -76,8 +77,21 @@ func (s *Service) Dispatch(in Intent) {
 	case IntentSetApprovalMode:
 		enabled := in.ApprovalMode == "auto_accept"
 		s.app.SetAutoAcceptPermissions(enabled)
-		s.emit(Event{Kind: EventInfo, Text: autoAcceptMessage(enabled), AutoAccept: enabled, AutoAcceptKnown: true})
-		s.emit(Event{Kind: EventTurnDone})
+		msg := "Auto-accept edits enabled"
+		if !enabled {
+			msg = "Ask for approval"
+		}
+		s.emit(Event{Kind: EventInfo, Text: msg, AutoAccept: enabled, AutoAcceptKnown: true})
+		s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
+	case IntentSetAutoReview:
+		s.app.SetAutoReviewEnabled(in.AutoReview)
+		msg := "Auto-review enabled"
+		if !in.AutoReview {
+			msg = "Auto-review disabled"
+		}
+		enabled := s.app.AutoAcceptPermissions()
+		s.emit(Event{Kind: EventInfo, Text: msg, AutoAccept: enabled, AutoAcceptKnown: true, AutoReview: in.AutoReview})
+		s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
 	case IntentEnableAutoAccept:
 		s.app.SetAutoAcceptPermissions(true)
 		s.emit(Event{Kind: EventInfo, Text: autoAcceptMessage(true), AutoAccept: true, AutoAcceptKnown: true})

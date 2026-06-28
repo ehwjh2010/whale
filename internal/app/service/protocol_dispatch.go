@@ -40,6 +40,7 @@ func (s *Service) DispatchProtocol(in protocol.Intent) {
 		WorkflowScript:     in.WorkflowScript,
 		WorkflowSaveAs:     in.WorkflowSaveAs,
 		WorkflowScriptPath: in.WorkflowScriptPath,
+		AutoReview:         in.AutoReview,
 	})
 }
 
@@ -75,6 +76,8 @@ func serviceIntentKind(kind protocol.IntentKind) IntentKind {
 		return IntentSetApprovalMode
 	case protocol.IntentEnableAutoAccept:
 		return IntentEnableAutoAccept
+	case protocol.IntentSetAutoReview:
+		return IntentSetAutoReview
 	case protocol.IntentSetViewMode:
 		return IntentSetViewMode
 	case protocol.IntentToggleMode:

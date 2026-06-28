@@ -95,6 +95,14 @@ func (a *App) ensureAgent() (*agent.Agent, error) {
 		if err != nil {
 			return nil, err
 		}
+		// When auto-review is enabled from config, it subsumes auto-accept
+		// (same as the interactive toggle). Both cfg and the live field must
+		// be set: cfg for hydration events, autoAcceptPermissions for the
+		// approval callback that runs during a turn.
+		if a.cfg.AutoReviewEnabled {
+			a.cfg.AutoAcceptPermissions = true
+			a.autoAcceptPermissions = true
+		}
 		a.a = agent.NewAgentWithRegistry(provider, a.msgStore, a.toolRegistry,
 			agent.WithSessionMode(a.currentMode),
 			agent.WithSessionsDir(a.sessionsDir),
@@ -111,6 +119,15 @@ func (a *App) ensureAgent() (*agent.Agent, error) {
 			agent.WithProjectMemory(a.cfg.MemoryEnabled, a.cfg.MemoryMaxChars, parseCSVList(a.cfg.MemoryFileOrder), a.workspaceRoot),
 			agent.WithWorktreeContext(a.worktree.Path, a.worktree.OriginalWorkspace),
 			agent.WithMaxParallelSubagents(a.cfg.MaxParallelSubagents),
+			agent.WithClassifierConfig(agent.ClassifierConfig{
+				Enabled:     a.cfg.AutoReviewEnabled,
+				Model:       a.cfg.AutoReviewModel,
+				APIKey:      a.apiKey,
+				TimeoutMS:   a.cfg.AutoReviewTimeoutMS,
+				AllowRules:  a.cfg.AutoReviewAllowRules,
+				DenyRules:   a.cfg.AutoReviewDenyRules,
+				Environment: a.cfg.AutoReviewEnvironment,
+			}),
 			agent.WithDisabledSkills(a.cfg.SkillsDisabled),
 			agent.WithExtraSkills(a.pluginManager.Skills()),
 			agent.WithApprovalFunc(func(req policy.ApprovalRequest) policy.ApprovalDecision {

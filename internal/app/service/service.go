@@ -31,6 +31,7 @@ const (
 	IntentSetModelAndEffort         IntentKind = "set_model_and_effort"
 	IntentSetApprovalMode           IntentKind = "set_approval_mode"
 	IntentEnableAutoAccept          IntentKind = "enable_auto_accept"
+	IntentSetAutoReview             IntentKind = "set_auto_review"
 	IntentSetViewMode               IntentKind = "set_view_mode"
 	IntentToggleMode                IntentKind = "toggle_mode"
 	IntentImplementPlan             IntentKind = "implement_plan"
@@ -65,6 +66,7 @@ type Intent struct {
 	Effort             string
 	Thinking           string
 	ApprovalMode       string
+	AutoReview         bool
 	ViewMode           string
 	SkillName          string
 	SkillEnabled       bool

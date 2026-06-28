@@ -112,7 +112,10 @@ func (m model) shouldRenderChatBottomOnlyGap() bool {
 func (m model) renderBottom(mainWidth int) string {
 	footerText := footerModelEffort(m.model, m.effort) +
 		"  " + footerField("thinking:", m.thinking, thinkingFooterColor(m.thinking))
-	if m.autoAccept {
+	switch permissionsMode(m.autoAccept, m.autoReviewEnabled) {
+	case "auto-review":
+		footerText += "  " + footerAutoAccept("auto-review")
+	case "auto-accept":
 		footerText += "  " + footerAutoAccept("auto-accept on")
 	}
 	if m.chatMode == "ask" || m.chatMode == "plan" {

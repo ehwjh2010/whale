@@ -56,8 +56,8 @@ func (m model) viewCacheSignature() string {
 		}
 	}
 	return fmt.Sprintf(
-		"mode=%d page=%d status=%s busy=%t stopping=%t local=%d chat=%s auto=%t view=%s model=%s effort=%s thinking=%s branch=%s cwd=%s slash=%d/%d/%s files=%t/%t/%d/%d/%s skills=%d/%d approval=%s/%s/%s/%d user=%s/%d/%d/%d/%s",
-		m.mode, m.page, m.status, m.busy, m.stopping, m.localSubmitPending, m.chatMode, m.autoAccept, m.viewMode,
+		"mode=%d page=%d status=%s busy=%t stopping=%t local=%d chat=%s auto=%t review=%t view=%s model=%s effort=%s thinking=%s branch=%s cwd=%s slash=%d/%d/%s files=%t/%t/%d/%d/%s skills=%d/%d approval=%s/%s/%s/%d user=%s/%d/%d/%d/%s",
+		m.mode, m.page, m.status, m.busy, m.stopping, m.localSubmitPending, m.chatMode, m.autoAccept, m.autoReviewEnabled, m.viewMode,
 		m.model, m.effort, m.thinking, m.gitBranch, m.cwd,
 		len(m.slash.matches), m.slash.selected, m.slash.argumentHint,
 		m.files.active, m.files.searching, len(m.files.matches), m.files.selected, m.files.query,

@@ -62,6 +62,7 @@ func (a *Agent) streamAndHandle(ctx context.Context, sessionID string, history [
 			Tools:          tools,
 			Events:         events,
 			AutoDenyCounts: autoDenyCounts,
+			History:        history,
 		}, nil, blocked)
 		if err != nil {
 			return core.Message{}, nil, llm.Usage{}, "", nil, false, attemptedToolCalls, err
@@ -76,6 +77,7 @@ func (a *Agent) streamAndHandle(ctx context.Context, sessionID string, history [
 		Tools:          tools,
 		Events:         events,
 		AutoDenyCounts: autoDenyCounts,
+		History:        history,
 	}, dispatchCalls, blocked)
 	if err != nil {
 		return core.Message{}, nil, llm.Usage{}, "", nil, false, attemptedToolCalls, err

@@ -21,6 +21,8 @@ type streamDispatchContext struct {
 	Tools          *core.ToolRegistry
 	Events         chan<- AgentEvent
 	AutoDenyCounts map[string]int
+	History        []core.Message // full conversation history for classifier
+	WarnPrefix     string         // classifier WARN prefix to prepend to next tool result
 }
 
 type toolApprovalResult struct {
@@ -201,6 +203,15 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, sc streamDispatchContext,
 			GrantKeys:         approval.GrantKeys,
 			ExternalReadRoots: approval.ExternalReadRoots,
 		}
+
+		// Auto-review classifier: check the tool call before execution.
+		// Translated from Claude Code's classifyYoloAction integration.
+		if a.classifier != nil && a.classifier.cfg.Enabled {
+			if classified := a.maybeBlockByClassifier(ctx, &sc, call, &results, &flushPendingParallelBatches); classified {
+				continue
+			}
+		}
+
 		if _, ok := maybeReadyParallelSubagentCall(i, call); ok {
 			pendingParallelSubagents = append(pendingParallelSubagents, prepared)
 			continue
@@ -222,6 +233,10 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, sc streamDispatchContext,
 		if err != nil {
 			return nil, false, err
 		}
+		// dispatchStandardTool receives sc by value, so clear WarnPrefix
+		// on the shared context to prevent stale warnings leaking to
+		// subsequent tool results.
+		sc.WarnPrefix = ""
 		if abortTurn {
 			requireEventDelivery := ctx.Err() == nil
 			if err := appendAbortSkippedToolResults(ctx, sc, &results, requireEventDelivery); err != nil {
@@ -252,13 +267,18 @@ func emitDispatchEvent(ctx context.Context, sc streamDispatchContext, ev AgentEv
 	return nil
 }
 
-func appendToolResult(ctx context.Context, sc streamDispatchContext, results *[]core.ToolResult, tr core.ToolResult) error {
+func appendToolResult(ctx context.Context, sc *streamDispatchContext, results *[]core.ToolResult, tr core.ToolResult) error {
 	// Results produced outside the dispatch funnel (special tools, blocked
 	// markers, recovery wrappers) get their channel-separated fields here,
 	// before the event is emitted and the result is persisted.
 	tr = core.FinalizeToolResultChannels(tr)
+	// Inject classifier WARN prefix into the model-visible text.
+	if sc.WarnPrefix != "" {
+		tr.ModelText = sc.WarnPrefix + tr.ModelText
+		sc.WarnPrefix = "" // consume once
+	}
 	*results = append(*results, tr)
-	return emitDispatchEvent(ctx, sc, AgentEvent{Type: AgentEventTypeToolResult, Result: &tr})
+	return emitDispatchEvent(ctx, *sc, AgentEvent{Type: AgentEventTypeToolResult, Result: &tr})
 }
 
 func appendAbortSkippedToolResults(ctx context.Context, sc streamDispatchContext, results *[]core.ToolResult, requireEventDelivery bool) error {
@@ -306,7 +326,7 @@ func appendBlockedToolResults(ctx context.Context, sc streamDispatchContext, blo
 		}); err != nil {
 			return err
 		}
-		if err := appendToolResult(ctx, sc, results, br); err != nil {
+		if err := appendToolResult(ctx, &sc, results, br); err != nil {
 			return err
 		}
 	}
@@ -393,7 +413,7 @@ func (a *Agent) appendPolicyDeniedResult(ctx context.Context, sc streamDispatchC
 			return err
 		}
 	}
-	return appendToolResult(ctx, sc, results, core.ToolResult{
+	return appendToolResult(ctx, &sc, results, core.ToolResult{
 		ToolCallID: call.ID,
 		Name:       call.Name,
 		ModelText:  policyDenialEnvelope(decision),
@@ -432,7 +452,7 @@ func (a *Agent) runPreToolUseHook(ctx context.Context, sc streamDispatchContext,
 			ModelText:  fmt.Sprintf(`{"success":false,"error":%q,"code":%q}`, msg, code),
 			Code:       code,
 		}
-		if err := appendToolResult(ctx, sc, results, tr); err != nil {
+		if err := appendToolResult(ctx, &sc, results, tr); err != nil {
 			return core.ToolCall{}, "", false, err
 		}
 		return call, "", true, nil
@@ -484,7 +504,7 @@ func (a *Agent) appendModeBlockedResult(ctx context.Context, sc streamDispatchCo
 		Reason:             blockedMsg,
 		Phase:              "denied",
 	})
-	return true, appendToolResult(ctx, sc, results, core.ToolResult{
+	return true, appendToolResult(ctx, &sc, results, core.ToolResult{
 		ToolCallID: call.ID,
 		Name:       call.Name,
 		ModelText:  content,
@@ -509,9 +529,9 @@ func (a *Agent) dispatchPreApprovalSpecialTool(ctx context.Context, sc streamDis
 	res, err := a.handleUpdatePlan(ctx, call, sc.Events)
 	if err != nil {
 		tr := core.ToolResult{ToolCallID: call.ID, Name: call.Name, ModelText: err.Error()}
-		return true, appendToolResult(ctx, sc, results, tr)
+		return true, appendToolResult(ctx, &sc, results, tr)
 	}
-	return true, appendToolResult(ctx, sc, results, res)
+	return true, appendToolResult(ctx, &sc, results, res)
 }
 
 func (a *Agent) resolveToolApproval(ctx context.Context, sc streamDispatchContext, spec core.ToolSpec, call core.ToolCall, decision policy.PolicyDecision, flushPendingParallelSubagents func() error, results *[]core.ToolResult) (toolApprovalResult, error) {
@@ -609,7 +629,7 @@ func (a *Agent) resolveToolApproval(ctx context.Context, sc streamDispatchContex
 		ModelText:  `{"success":false,"error":"tool approval denied","code":"approval_denied"}`,
 		Code:       "approval_denied",
 	}
-	if err := appendToolResult(ctx, sc, results, tr); err != nil {
+	if err := appendToolResult(ctx, &sc, results, tr); err != nil {
 		return toolApprovalResult{}, err
 	}
 	if err := appendAbortSkippedToolResults(ctx, sc, results, true); err != nil {
@@ -633,18 +653,18 @@ func (a *Agent) dispatchPostApprovalSpecialTool(ctx context.Context, sc streamDi
 		res, err := a.handleRequestUserInput(ctx, call, sc.SessionID, sc.Events)
 		if err != nil {
 			tr := core.ToolResult{ToolCallID: call.ID, Name: call.Name, ModelText: err.Error()}
-			return true, appendToolResult(ctx, sc, results, tr)
+			return true, appendToolResult(ctx, &sc, results, tr)
 		}
-		return true, appendToolResult(ctx, sc, results, res)
+		return true, appendToolResult(ctx, &sc, results, res)
 	}
 	switch call.Name {
 	case "todo_add", "todo_list", "todo_update", "todo_remove", "todo_clear_done":
 		res, err := a.handleTodo(call, sc.SessionID)
 		if err != nil {
 			tr := core.ToolResult{ToolCallID: call.ID, Name: call.Name, ModelText: err.Error()}
-			return true, appendToolResult(ctx, sc, results, tr)
+			return true, appendToolResult(ctx, &sc, results, tr)
 		}
-		return true, appendToolResult(ctx, sc, results, res)
+		return true, appendToolResult(ctx, &sc, results, res)
 	default:
 		return false, nil
 	}
@@ -658,6 +678,10 @@ func (a *Agent) dispatchStandardTool(ctx context.Context, sc streamDispatchConte
 	}
 	if !ok {
 		return false, nil
+	}
+	// Apply classifier WARN prefix to the tool result text before persisting.
+	if sc.WarnPrefix != "" {
+		finalRes.ModelText = sc.WarnPrefix + finalRes.ModelText
 	}
 	if !a.appendDispatchedToolResult(ctx, sc.SessionID, prepared, finalRes, primarySucceeded, sc.Events, results, !canceled) {
 		return false, ctx.Err()

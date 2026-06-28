@@ -1751,7 +1751,7 @@ func TestPermissionsCommandOpensMenuAndSetsSessionAutoAccept(t *testing.T) {
 
 	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "auto_accept"})
 	info := waitForServiceEvent(t, svc, EventInfo)
-	if info.Text != "Session auto-accept enabled" {
+	if info.Text != "Auto-accept edits enabled" {
 		t.Fatalf("unexpected permissions enable info: %q", info.Text)
 	}
 	waitForServiceEvent(t, svc, EventTurnDone)
@@ -1765,7 +1765,7 @@ func TestPermissionsCommandOpensMenuAndSetsSessionAutoAccept(t *testing.T) {
 
 	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "ask"})
 	info = waitForServiceEvent(t, svc, EventInfo)
-	if info.Text != "Session auto-accept disabled" {
+	if info.Text != "Ask for approval" {
 		t.Fatalf("unexpected permissions disable info: %q", info.Text)
 	}
 	waitForServiceEvent(t, svc, EventTurnDone)

@@ -55,22 +55,38 @@ func (m model) renderPermissionsMenu() string {
 		pickerTitle("Permissions"),
 		"",
 	}
-	items := []string{
-		permissionsMenuOptionLabel("on", m.permissionsMenu.autoAccept),
-		permissionsMenuOptionLabel("off", !m.permissionsMenu.autoAccept),
-		"cancel",
+	askLabel := "Ask for approval"
+	autoAcceptLabel := "Auto-accept edits"
+	autoReviewLabel := "Auto-review"
+	current := permissionsMode(m.autoAccept, m.autoReviewEnabled)
+	items := []struct {
+		label string
+		mode  string
+	}{
+		{label: currentLabel(askLabel, current == "ask"), mode: "ask"},
+		{label: currentLabel(autoReviewLabel, current == "auto-review"), mode: "auto-review"},
+		{label: currentLabel(autoAcceptLabel, current == "auto-accept"), mode: "auto-accept"},
 	}
 	for i, item := range items {
-		rows = append(rows, pickerRow(item, i == m.permissionsMenu.selected, item == "cancel"))
+		rows = append(rows, pickerRow(item.label, i == m.permissionsMenu.selected, false))
 	}
-	rows = append(rows, "", pickerHint("(up/down choose, enter confirm, esc cancel)"))
+	rows = append(rows, "", pickerRow("cancel", m.permissionsMenu.selected == 3, true), "", pickerHint("(up/down choose, enter confirm, esc cancel)"))
 	return strings.Join(rows, "\n")
 }
 
-func permissionsMenuOptionLabel(state string, current bool) string {
-	label := "auto-accept: " + state
+func permissionsMode(autoAccept, autoReview bool) string {
+	if autoReview {
+		return "auto-review"
+	}
+	if autoAccept {
+		return "auto-accept"
+	}
+	return "ask"
+}
+
+func currentLabel(label string, current bool) string {
 	if current {
-		label += " (current)"
+		return label + " (current)"
 	}
 	return label
 }

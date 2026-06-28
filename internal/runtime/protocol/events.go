@@ -103,6 +103,7 @@ type Event struct {
 	CurrentThinking  string               `json:"current_thinking,omitempty"`
 	AutoAccept       bool                 `json:"auto_accept,omitempty"`
 	AutoAcceptKnown  bool                 `json:"auto_accept_known,omitempty"`
+	AutoReview       bool                 `json:"auto_review,omitempty"`
 	ViewMode         string               `json:"view_mode,omitempty"`
 	LocalResult      *LocalResult         `json:"local_result,omitempty"`
 	Hook             *HookRun             `json:"hook,omitempty"`
