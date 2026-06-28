@@ -9,10 +9,10 @@ package agent
 // go through the classifier.
 var classifierAllowlist = map[string]bool{
 	// File read and inspection
-	"read_file":   true,
-	"list_dir":    true,
-	"grep":        true,
-	"glob":        true,
+	"read_file":    true,
+	"list_dir":     true,
+	"grep":         true,
+	"glob":         true,
 	"search_files": true,
 
 	// Shell polling (read-only, waits for background task)
@@ -22,7 +22,7 @@ var classifierAllowlist = map[string]bool{
 	"recall_memory": true,
 
 	// Todo management (metadata only — no file mutation)
-	"todo_list":      true,
+	"todo_list": true,
 
 	// Goal inspection (read-only metadata)
 	"get_goal": true,

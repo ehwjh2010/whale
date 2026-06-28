@@ -294,8 +294,8 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				} else {
 					consecutiveRedundantRounds = 0
 				}
-			loopDetected := consecutiveStormRounds >= maxConsecutiveStormRounds ||
-				consecutiveRedundantRounds >= maxConsecutiveRedundantRounds
+				loopDetected := consecutiveStormRounds >= maxConsecutiveStormRounds ||
+					consecutiveRedundantRounds >= maxConsecutiveRedundantRounds
 				// In Plan mode, a spinning turn never ends on its own, so the
 				// end-of-turn finalization can't reach it. Before the runaway-loop
 				// guard terminates planning with a contentless force-summary, give

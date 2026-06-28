@@ -49,15 +49,15 @@ type ClassifierReview struct {
 
 // ClassifierReviewEvent is emitted via AgentEvent for TUI display and telemetry.
 type ClassifierReviewEvent struct {
-	ToolCallID   string
-	ToolName     string
-	Decision     ClassifierDecision
-	Reason       string
-	Risk         ClassifierRisk
-	Model        string
-	DurationMS   int64
+	ToolCallID    string
+	ToolName      string
+	Decision      ClassifierDecision
+	Reason        string
+	Risk          ClassifierRisk
+	Model         string
+	DurationMS    int64
 	FromAllowlist bool
-	Blocked      bool
+	Blocked       bool
 }
 
 // ClassifierAction mirrors the concept from Codex GuardianAssessmentAction:

@@ -82,7 +82,7 @@ func (a *Agent) maybeBlockByClassifier(
 		}
 
 		if err := emitDispatchEvent(ctx, *sc, AgentEvent{
-			Type: AgentEventTypeToolResult,
+			Type:   AgentEventTypeToolResult,
 			Result: &tr,
 		}); err != nil {
 			return false
@@ -119,5 +119,3 @@ func emitClassifierEvent(ctx context.Context, sc streamDispatchContext, review *
 		Classifier: ev,
 	})
 }
-
-
