@@ -31,10 +31,10 @@ func (a *App) InitializeMCP(ctx context.Context, emit func(whalemcp.StartupEvent
 		}
 		if ev.Complete {
 			a.freezeMCPToolSignature()
-		if err := a.RestorePromotedTools(); err != nil {
-			// Non-fatal: restored tools couldn't be promoted, agent can still use tool_search.
-			fmt.Fprintf(os.Stderr, "whale: RestorePromotedTools: %v\n", err)
-		}
+			if err := a.RestorePromotedTools(); err != nil {
+				// Non-fatal: restored tools couldn't be promoted, agent can still use tool_search.
+				fmt.Fprintf(os.Stderr, "whale: RestorePromotedTools: %v\n", err)
+			}
 		}
 		if emit != nil {
 			emit(ev)

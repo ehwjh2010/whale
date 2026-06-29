@@ -344,8 +344,11 @@ func (m *Manager) BuildTools(names []string) ([]core.Tool, error) {
 	var out []core.Tool
 	byName := make(map[string]discoveredTool)
 	seen := map[string]bool{}
-	for _, tools := range m.discovery {
-		for _, tool := range tools {
+	// Resolve qualified names in the SAME deterministic order as
+	// buildDeferredCatalogLocked so collision-disambiguated names (via
+	// UniqueToolName) bind to the same underlying tools the catalog advertised.
+	for _, serverName := range sortedDiscoveredServerNames(m.discovery) {
+		for _, tool := range sortedDiscoveredTools(m.discovery[serverName]) {
 			qn := UniqueToolName(QualifyToolName(tool.serverName, tool.toolName), seen)
 			byName[qn] = tool
 		}

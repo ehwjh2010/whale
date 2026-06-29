@@ -151,17 +151,6 @@ func (r *ToolRegistry) addToolsLocked(tools []Tool) error {
 	return nil
 }
 
-// HasTool returns true if the tool name is registered.
-func (r *ToolRegistry) HasTool(name string) bool {
-	if r == nil {
-		return false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, ok := r.byName[name]
-	return ok
-}
-
 func (r *ToolRegistry) Snapshot() *ToolRegistry {
 	if r == nil {
 		return NewToolRegistry(nil)
