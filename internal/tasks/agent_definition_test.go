@@ -118,6 +118,50 @@ func TestBuiltinResearchAgentIncludesWebTools(t *testing.T) {
 	}
 }
 
+func TestBuiltinRolesCarryToolCallDefaults(t *testing.T) {
+	cases := []struct {
+		role string
+		want int
+	}{
+		{"explore", exploreDefaultMaxToolCalls},
+		{"research", researchDefaultMaxToolCalls},
+		{"review", reviewDefaultMaxToolCalls},
+	}
+	for _, c := range cases {
+		cfg, err := ResolveAgentRuntimeConfig(SpawnSubagentRequest{
+			Role: c.role,
+			Task: "go",
+		}, RunnerDefaults{Model: "deepseek-v4-flash", MaxToolIters: 3})
+		if err != nil {
+			t.Fatalf("%s: ResolveAgentRuntimeConfig: %v", c.role, err)
+		}
+		if cfg.MaxToolCalls != c.want {
+			t.Errorf("%s MaxToolCalls = %d, want %d", c.role, cfg.MaxToolCalls, c.want)
+		}
+		// The default must be comfortably above the budget that truncated the
+		// reported session (50), so a thorough read-only run is not starved.
+		if cfg.MaxToolCalls <= 50 {
+			t.Errorf("%s MaxToolCalls = %d, want a generous (>50) default", c.role, cfg.MaxToolCalls)
+		}
+	}
+}
+
+func TestSpawnToolIgnoresModelSuppliedToolCallBudget(t *testing.T) {
+	// The spawn tool clears any budget the model passed, so the role default
+	// governs rather than a model guess. Verify the request-level field is
+	// dropped on the model-facing path while the role default still resolves.
+	req := SpawnSubagentRequest{Role: "explore", Task: "go", MaxToolCalls: 5, MaxToolIters: 4}
+	req.MaxToolCalls = 0 // mirrors spawnSubagentTool.RunWithProgress
+	req.MaxToolIters = 0
+	cfg, err := ResolveAgentRuntimeConfig(req, RunnerDefaults{Model: "deepseek-v4-flash", MaxToolIters: 200})
+	if err != nil {
+		t.Fatalf("ResolveAgentRuntimeConfig: %v", err)
+	}
+	if cfg.MaxToolCalls != exploreDefaultMaxToolCalls {
+		t.Fatalf("MaxToolCalls = %d, want role default %d (model value must be ignored)", cfg.MaxToolCalls, exploreDefaultMaxToolCalls)
+	}
+}
+
 func TestAgentDefinitionLibraryLoadsWhaleMarkdownAgent(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".whale", "agents")

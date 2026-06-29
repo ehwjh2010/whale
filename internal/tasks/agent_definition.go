@@ -258,6 +258,21 @@ func resolveAgentDefinition(req SpawnSubagentRequest, library *AgentDefinitionLi
 	return mergeAgentDefinition(def, req.Agent, name), nil
 }
 
+// Default tool-call ceilings for the built-in subagent roles. These bound an
+// unattended child (no human in the loop) as a backstop; the child is steered to
+// wrap up before reaching the ceiling (see toolCallWrapUpThreshold). They are
+// deliberately generous — the spawn tool no longer lets the parent model pick a
+// budget, so an under-guess can no longer starve a thorough run. A workspace
+// .whale/agents definition or a workflow script may still override per agent.
+const (
+	// Read-only exploration / research routinely span many files or sources;
+	// the reported session needed >50 just to read two projects thoroughly.
+	exploreDefaultMaxToolCalls  = 150
+	researchDefaultMaxToolCalls = 150
+	// Review is a more bounded pass over a known change set.
+	reviewDefaultMaxToolCalls = 100
+)
+
 func builtinAgentDefinition(name string) (AgentDefinition, bool) {
 	switch strings.TrimSpace(name) {
 	case "research":
@@ -267,6 +282,7 @@ func builtinAgentDefinition(name string) (AgentDefinition, bool) {
 			WhenToUse:      "Use for bounded source-backed research using workspace, web, or model-only tools.",
 			Tools:          []string{CapabilityWorkspaceRead, CapabilityWebSearch, CapabilityWebFetch},
 			PermissionMode: AgentPermissionReadOnly,
+			MaxToolCalls:   researchDefaultMaxToolCalls,
 		}, true
 	case "review":
 		return AgentDefinition{
@@ -275,6 +291,7 @@ func builtinAgentDefinition(name string) (AgentDefinition, bool) {
 			WhenToUse:      "Use for bounded review of correctness risks, regressions, and missing verification.",
 			Tools:          []string{CapabilityWorkspaceRead, CapabilityShellRead},
 			PermissionMode: AgentPermissionReadOnly,
+			MaxToolCalls:   reviewDefaultMaxToolCalls,
 		}, true
 	case "explore":
 		return AgentDefinition{
@@ -283,6 +300,7 @@ func builtinAgentDefinition(name string) (AgentDefinition, bool) {
 			WhenToUse:      "Use for bounded codebase or source exploration.",
 			Tools:          []string{CapabilityWorkspaceRead, CapabilityShellRead},
 			PermissionMode: AgentPermissionReadOnly,
+			MaxToolCalls:   exploreDefaultMaxToolCalls,
 		}, true
 	default:
 		return AgentDefinition{}, false
