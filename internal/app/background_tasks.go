@@ -9,6 +9,16 @@ import (
 	"github.com/usewhale/whale/internal/tools"
 )
 
+// RunningBackgroundShellTasks exposes the live set of running background shell
+// tasks for surfaces (e.g. the TUI footer hint) that summarize them without
+// running the /ps command. Returns nil when no toolset is attached.
+func (a *App) RunningBackgroundShellTasks() []tools.BackgroundShellTask {
+	if a == nil || a.toolset == nil {
+		return nil
+	}
+	return a.toolset.RunningBackgroundShellTasks()
+}
+
 func (a *App) executePSCommand() CommandExecution {
 	if a == nil || a.toolset == nil {
 		text := "Background tasks\n\nNo background shell tasks running."

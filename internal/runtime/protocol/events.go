@@ -347,6 +347,13 @@ type SkillView struct {
 	Missing       []MissingRequirement `json:"missing,omitempty"`
 }
 
+// BackgroundShell is a compact view of a running background shell task,
+// surfaced to the TUI footer hint. The full task list lives behind /ps.
+type BackgroundShell struct {
+	Command string `json:"command,omitempty"`
+	Status  string `json:"status,omitempty"`
+}
+
 type MissingRequirement struct {
 	Kind   string `json:"kind,omitempty"`
 	Name   string `json:"name,omitempty"`

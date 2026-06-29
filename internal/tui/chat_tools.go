@@ -25,6 +25,16 @@ func summarizeToolCallForChat(toolName, text string) string {
 	detail := toolCallDetail(text)
 	switch toolDisplayKind(toolName) {
 	case "shell":
+		// shell_wait / shell_cancel carry only a task_id, which is an opaque
+		// internal handle — never surface it. The originating command is
+		// recovered on the result line (see runningShellTitle/completedToolTitle),
+		// so in-flight we show an honest verb + noun instead of "Running task-…".
+		switch strings.TrimSpace(toolName) {
+		case "shell_wait":
+			return "Waiting on background shell"
+		case "shell_cancel":
+			return "Canceling background shell"
+		}
 		if detail == "" {
 			detail = "shell command"
 		}
@@ -458,7 +468,6 @@ func toolCallDetail(text string) string {
 				core.AsString(body["query"]),
 				core.AsString(body["url"]),
 				core.AsString(body["name"]),
-				core.AsString(body["task_id"]),
 				core.AsString(body["text"]),
 				core.AsString(body["id"]),
 			)

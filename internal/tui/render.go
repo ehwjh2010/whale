@@ -172,6 +172,11 @@ func (m model) bottomPartsBeforeInput(mainWidth int) []string {
 	if statusLine := m.renderBusyStatusLine(mainWidth); statusLine != "" {
 		bottomParts = append(bottomParts, statusLine)
 	}
+	if m.mode == modeChat {
+		if hint := m.renderBackgroundShellHint(mainWidth); hint != "" {
+			bottomParts = append(bottomParts, hint)
+		}
+	}
 	if btw := m.renderBtwPanel(mainWidth); btw != "" {
 		bottomParts = append(bottomParts, btw)
 	}

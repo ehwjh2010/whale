@@ -67,6 +67,9 @@ func (m model) renderBusyStatusLine(width int) string {
 			line += " · Ctrl+C to interrupt"
 		}
 	}
+	if hint := backgroundShellHint(len(m.bgShells)); hint != "" {
+		line += " · " + hint
+	}
 	return lipgloss.NewStyle().
 		Width(width).
 		Foreground(tuitheme.Default.Warn).
@@ -93,6 +96,25 @@ func (m model) stoppingQuitHint() string {
 		return "press Ctrl+C once more to force quit"
 	}
 	return fmt.Sprintf("press Ctrl+C %d more times to force quit", remaining)
+}
+
+// renderBackgroundShellHint renders the standalone idle footer row. The busy
+// status line carries the same hint inline while working, so this row only
+// surfaces when not busy — mirroring codex's "status.is_none()" guard so the
+// summary never appears in two places at once.
+func (m model) renderBackgroundShellHint(width int) string {
+	if m.busy || width <= 0 {
+		return ""
+	}
+	hint := backgroundShellHint(len(m.bgShells))
+	if hint == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().
+		Width(width).
+		MaxWidth(width).
+		Foreground(tuitheme.Default.Muted).
+		Render(hint)
 }
 
 func busyStatusLabel(status string) string {

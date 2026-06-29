@@ -107,6 +107,8 @@ type model struct {
 	busyTokenNonASCIIChars int
 	providerRetryStatus    string
 	providerRetryUntil     time.Time
+	bgShells               []protocol.BackgroundShell
+	bgShellTicking         bool
 	localSubmitPending     int
 	localSubmitCommands    []string
 	btwPanel               btwPanelState
@@ -312,6 +314,12 @@ type svcBatchMsg []protocol.Event
 type errMsg struct{ err error }
 type quitTimeoutMsg struct{}
 type busyTickMsg struct{}
+type bgShellTickMsg struct{}
+
+// bgShellTickInterval polls the background-shell set while at least one task is
+// running, so a task that exits on its own between turns (no tool-result event)
+// drops out of the footer hint within a beat.
+const bgShellTickInterval = 1500 * time.Millisecond
 
 const serviceDeltaFrame = 100 * time.Millisecond
 
@@ -439,6 +447,29 @@ func busyTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return busyTickMsg{} })
 }
 
+func bgShellTickCmd() tea.Cmd {
+	return tea.Tick(bgShellTickInterval, func(time.Time) tea.Msg { return bgShellTickMsg{} })
+}
+
+// refreshBackgroundShells re-reads the running background-shell set from the
+// runtime. It returns a command that keeps a single poll ticker alive while any
+// task is running, and lets it lapse once the set is empty.
+func (m *model) refreshBackgroundShells() tea.Cmd {
+	if m.runtime == nil {
+		return nil
+	}
+	m.bgShells = m.runtime.RunningBackgroundShells()
+	if len(m.bgShells) == 0 {
+		m.bgShellTicking = false
+		return nil
+	}
+	if m.bgShellTicking {
+		return nil
+	}
+	m.bgShellTicking = true
+	return bgShellTickCmd()
+}
+
 // clearScreenCmd clears the visible terminal, scrollback, and renderer cache.
 func clearScreenCmd() tea.Cmd {
 	return clearScreenCmdForOS(runtime.GOOS, os.Stdout)
@@ -488,6 +519,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.sequenceCmds(busyTickCmd())
 		}
 		return m, m.sequenceCmds()
+	case bgShellTickMsg:
+		m.bgShellTicking = false
+		return m, m.sequenceCmds(m.refreshBackgroundShells())
 	case workflowPanelRefreshMsg:
 		return m, m.sequenceCmds(m.handleWorkflowPanelRefresh(msg))
 	case gitBranchUpdatedMsg:
@@ -579,7 +613,8 @@ func (m model) handleServiceUpdate(events []protocol.Event) (tea.Model, tea.Cmd)
 	}
 	headerCmd := m.startupHeaderPrintCmd()
 	scrollbackCmd := m.flushNativeScrollbackCmd()
-	mainCmd := m.sequenceCmds(eventCmd, headerCmd, scrollbackCmd, waitEventCmd(m.runtime))
+	bgShellCmd := m.refreshBackgroundShells()
+	mainCmd := m.sequenceCmds(eventCmd, headerCmd, scrollbackCmd, bgShellCmd, waitEventCmd(m.runtime))
 	if containsTurnDone(events) {
 		return m, tea.Batch(mainCmd, detectGitBranchCmd(m.cwdPath))
 	}
