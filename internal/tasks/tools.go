@@ -214,6 +214,7 @@ func (t spawnSubagentTool) RunWithProgress(ctx context.Context, call core.ToolCa
 		"model":              res.Model,
 		"permission_profile": res.PermissionProfile,
 		"status":             res.Status,
+		"report":             res.Report,
 		"summary":            res.Summary,
 		"truncated":          res.Truncated,
 		"tool_calls":         res.ToolCalls,
@@ -274,7 +275,7 @@ type subagentStatusRequest struct {
 
 func (t subagentStatusTool) Name() string { return "subagent_status" }
 func (t subagentStatusTool) Description() string {
-	return "Read a child subagent lifecycle record by session_id. Use after launching a background child agent to observe running/completed/failed/cancelled state and recover its result summary."
+	return "Read a child subagent lifecycle record by session_id. Use after launching a background child agent to observe running/completed/failed/cancelled state and recover its full result report."
 }
 func (t subagentStatusTool) Parameters() map[string]any {
 	return map[string]any{
@@ -307,6 +308,7 @@ func (t subagentStatusTool) Run(_ context.Context, call core.ToolCall) (core.Too
 		"model":                meta.Model,
 		"task":                 meta.Task,
 		"status":               meta.Status,
+		"report":               meta.Report,
 		"summary":              meta.Summary,
 		"error":                meta.Error,
 		"workspace":            meta.Workspace,
@@ -357,6 +359,7 @@ func (t cancelSubagentTool) Run(_ context.Context, call core.ToolCall) (core.Too
 		"session_id":   req.SessionID,
 		"cancelled":    cancelled,
 		"status":       meta.Status,
+		"report":       meta.Report,
 		"summary":      meta.Summary,
 		"error":        meta.Error,
 		"completed_at": meta.CompletedAt,

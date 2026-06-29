@@ -83,9 +83,13 @@ type AgentTaskSpec struct {
 }
 
 type AgentTaskResult struct {
-	TaskID           TaskID    `json:"task_id"`
-	ChildSessionID   string    `json:"child_session_id,omitempty"`
-	Status           string    `json:"status"`
+	TaskID         TaskID `json:"task_id"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Status         string `json:"status"`
+	// Report is the subagent's full final message — what a schemaless agent()
+	// call returns to a workflow script. Summary is only a one-line preview and
+	// must never be the value handed back to scripts.
+	Report           string    `json:"report,omitempty"`
 	Summary          string    `json:"summary,omitempty"`
 	StructuredResult any       `json:"structured_result,omitempty"`
 	ToolCalls        []string  `json:"tool_calls,omitempty"`
