@@ -79,11 +79,15 @@ func (t spawnSubagentTool) Parameters() map[string]any {
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]any{
-			"task":           map[string]any{"type": "string", "description": "Self-contained task for the child agent. The available tools are determined by the requested role, named agent definition, or explicit tools allowlist."},
-			"role":           map[string]any{"type": "string", "description": "Built-in role (explore, research, review) or an agent definition name from .whale/agents."},
-			"model":          map[string]any{"type": "string", "description": "Optional model override. Defaults to the configured cheap model."},
-			"max_tool_iters": map[string]any{"type": "integer", "minimum": 1, "maximum": 64},
-			"max_tool_calls": map[string]any{"type": "integer", "minimum": 1, "maximum": 128},
+			"task":  map[string]any{"type": "string", "description": "Self-contained task for the child agent. The available tools are determined by the requested role, named agent definition, or explicit tools allowlist."},
+			"role":  map[string]any{"type": "string", "description": "Built-in role (explore, research, review) or an agent definition name from .whale/agents."},
+			"model": map[string]any{"type": "string", "description": "Optional model override. Defaults to the configured cheap model."},
+			// Execution-budget knobs (tool-call / turn ceilings) are intentionally
+			// not exposed here: a parent model guessing a budget tends to starve a
+			// thorough child (see the role defaults in builtinAgentDefinition). The
+			// bound comes from the role definition / runner defaults. Workflow
+			// scripts that genuinely need a custom budget set it programmatically
+			// via the scheduler, which bypasses this tool.
 			"tools": map[string]any{
 				"type":        "array",
 				"description": "Optional least-privilege tool selectors. Omit to use the selected agent defaults. Pass [] for model-only. Selectors may be known aliases such as workspace.read or exact tool names exposed to the parent agent.",
@@ -170,6 +174,13 @@ func (t spawnSubagentTool) RunWithProgress(ctx context.Context, call core.ToolCa
 	if err != nil {
 		return marshalError(call, "invalid_input", err.Error())
 	}
+	// The model-facing spawn tool does not honor execution-budget knobs; bounds
+	// come from the role definition / runner defaults, never from a model guess.
+	// Clear anything the model passed (the schema omits these, but be explicit so
+	// a smuggled value can't starve the child). The workflow scheduler builds the
+	// request directly and is unaffected by this.
+	req.MaxToolCalls = 0
+	req.MaxToolIters = 0
 	req.ParentToolCallID = call.ID
 	res, err := t.runner.SpawnSubagentWithProgress(ctx, req, func(p core.ToolProgress) {
 		if progress == nil {

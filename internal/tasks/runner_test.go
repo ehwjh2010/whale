@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1651,6 +1652,71 @@ func TestSpawnSubagentMaxTurnsForcesSummary(t *testing.T) {
 		return p.Status == "forced_summary_started" && strings.Contains(p.Summary, "turn cap reached")
 	}) {
 		t.Fatalf("missing forced summary progress: %+v", progress)
+	}
+}
+
+// TestSpawnSubagentHonorsProgrammaticMaxToolCalls locks the contract that the
+// model-facing spawn tool zeroes (see spawnSubagentTool.RunWithProgress), but
+// the programmatic path the workflow scheduler uses does NOT: an explicit
+// MaxToolCalls on the request is honored, overriding the generous role default.
+// A refactor that routed scheduler spawns through the tool would break custom
+// workflow budgets, and this test would catch it.
+func TestSpawnSubagentHonorsProgrammaticMaxToolCalls(t *testing.T) {
+	round := 0
+	factory := func(_ string, _ int) (llm.Provider, error) {
+		return providerFunc(func(_ context.Context, _ []core.Message, tools []core.Tool) <-chan llm.ProviderEvent {
+			out := make(chan llm.ProviderEvent, 1)
+			go func() {
+				defer close(out)
+				if len(tools) == 0 {
+					// Forced-summary call suppresses tools; answer it.
+					out <- llm.ProviderEvent{Type: llm.EventComplete, Response: &llm.ProviderResponse{
+						FinishReason: core.FinishReasonEndTurn,
+						Content:      "forced tool-call cap summary",
+					}}
+					return
+				}
+				round++
+				// Vary args each round so the storm/progress guards don't fire
+				// before the explicit 2-call cap does.
+				out <- llm.ProviderEvent{Type: llm.EventComplete, Response: &llm.ProviderResponse{
+					FinishReason: core.FinishReasonToolUse,
+					ToolCalls: []core.ToolCall{{
+						ID:    fmt.Sprintf("child-read-%d", round),
+						Name:  "read_file",
+						Input: fmt.Sprintf(`{"file_path":"f%d.go"}`, round),
+					}},
+				}}
+			}()
+			return out
+		}), nil
+	}
+	parent := core.NewToolRegistry([]core.Tool{testTool{name: "read_file", readOnly: true, capabilities: []string{CapabilityWorkspaceRead}}})
+	r := NewRunner(RunnerConfig{ProviderFactory: factory, ParentTools: parent})
+	var progress []core.ToolProgress
+	// explore's role default is 150; the explicit 2 must win on this path.
+	res, err := r.SpawnSubagentWithProgress(context.Background(), SpawnSubagentRequest{
+		Task:         "inspect",
+		Role:         "explore",
+		MaxToolCalls: 2,
+	}, func(p core.ToolProgress) {
+		progress = append(progress, p)
+	})
+	if err != nil {
+		t.Fatalf("SpawnSubagentWithProgress: %v", err)
+	}
+	if !strings.Contains(res.Summary, "auto-interrupted") {
+		t.Fatalf("expected truncation banner from the explicit 2-call cap, got %q", res.Summary)
+	}
+	if !slices.ContainsFunc(progress, func(p core.ToolProgress) bool {
+		return p.Status == "forced_summary_started" && strings.Contains(p.Summary, "tool call cap reached")
+	}) {
+		t.Fatalf("missing tool-call-cap forced summary; the explicit budget was not honored: %+v", progress)
+	}
+	// The cap fired at 2, far below the role default of 150: two tool rounds
+	// plus the forced-summary call.
+	if round != 2 {
+		t.Fatalf("tool rounds = %d, want exactly 2 (explicit cap honored, not the 150 default)", round)
 	}
 }
 

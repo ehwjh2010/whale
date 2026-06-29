@@ -123,6 +123,7 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 		modelTurns := 0
 		toolIters := 0
 		toolCalls := 0
+		wrapUpNudged := false
 		planLoopNudges := 0
 		leakedToolCallNudges := 0
 		consecutiveStormRounds := 0
@@ -344,6 +345,25 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				if a.maxTurns > 0 && modelTurns >= a.maxTurns {
 					a.forceSummaryAndFinish(ctx, sessionID, history, "turn cap reached", summaryRequestContextFromPrefix(rt.Prefix, rt.RuntimeBlocks()), emit)
 					return
+				}
+				// Approaching the tool-call cap: steer the model to wrap up and
+				// produce its final answer while it still has calls in hand,
+				// instead of being hard-truncated mid-task by the cap below.
+				// Fires once. Codex-style budget steering — wrap up without
+				// aborting. Only capped agents (subagents) reach this; the
+				// capless main agent has maxToolCalls == 0.
+				if a.maxToolCalls > 0 && !wrapUpNudged {
+					if threshold := toolCallWrapUpThreshold(a.maxToolCalls); threshold > 0 && toolCalls >= threshold && toolCalls < a.maxToolCalls {
+						wrapUpNudged = true
+						nudge, err := a.persistToolCallWrapUpNudge(ctx, sessionID)
+						if err != nil {
+							emit(AgentEvent{Type: AgentEventTypeError, Err: err})
+							return
+						}
+						rt.Log.Append(nudge)
+						history = append(history, nudge)
+						continue
+					}
 				}
 				if a.maxToolCalls > 0 && toolCalls >= a.maxToolCalls {
 					a.forceSummaryAndFinish(ctx, sessionID, history, "tool call cap reached", summaryRequestContextFromPrefix(rt.Prefix, rt.RuntimeBlocks()), emit)

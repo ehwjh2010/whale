@@ -184,6 +184,102 @@ func TestAgentMaxToolCallsDropsExcessAndForcesSummary(t *testing.T) {
 	}
 }
 
+// wrapUpProvider emits one tool call per round until it sees the wrap-up nudge
+// in history, then cooperates by returning a final text answer. It models a
+// well-behaved capped subagent that finishes cleanly when steered, instead of
+// running into the hard cap.
+type wrapUpProvider struct {
+	toolRounds int
+	sawNudge   bool
+}
+
+func (p *wrapUpProvider) StreamResponse(_ context.Context, msgs []Message, tools []Tool) <-chan ProviderEvent {
+	if len(tools) == 0 {
+		return eventStream(endTurnEvent("forced summary"))
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "tool_call_budget_low") {
+			p.sawNudge = true
+		}
+	}
+	if p.sawNudge {
+		return eventStream(endTurnEvent("done — here is my final summary"))
+	}
+	p.toolRounds++
+	// Vary args each round so neither the storm breaker (identical calls) nor
+	// the progress guard fires before the wrap-up threshold is reached.
+	return eventStream(toolUseEvent(toolCall(fmt.Sprintf("tc-%d", p.toolRounds), "echo", fmt.Sprintf(`{"n":%d}`, p.toolRounds))))
+}
+
+func TestAgentToolCallWrapUpNudgeLetsModelFinishBeforeCap(t *testing.T) {
+	store := NewInMemoryStore()
+	prov := &wrapUpProvider{}
+	a := NewAgent(prov, store, []Tool{echoTool{}})
+	// threshold(10) == 7, so the nudge fires at 7 calls with 3 in hand.
+	WithMaxToolCalls(10)(a)
+
+	events, err := a.RunStream(context.Background(), "s-wrap-up", "go")
+	if err != nil {
+		t.Fatalf("RunStream: %v", err)
+	}
+	var forced bool
+	var done *core.Message
+	for ev := range events {
+		switch ev.Type {
+		case AgentEventTypeForcedSummaryStarted:
+			forced = true
+		case AgentEventTypeDone:
+			done = ev.Message
+		case AgentEventTypeError:
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+	if !prov.sawNudge {
+		t.Fatal("expected the model to receive the wrap-up nudge")
+	}
+	if forced {
+		t.Fatal("a cooperative model should finish without a forced summary")
+	}
+	if done == nil || strings.Contains(done.Text, "auto-interrupted") {
+		t.Fatalf("expected a clean final answer, got %+v", done)
+	}
+	// The nudge must be injected exactly once.
+	all, err := store.List(context.Background(), "s-wrap-up")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// Match the exact shape persistToolCallWrapUpNudge writes (hidden user
+	// message) rather than substring-matching every message, so an unrelated
+	// message that happens to quote the nudge text can't skew the count.
+	var nudges int
+	for _, m := range all {
+		if m.Role == core.RoleUser && m.Hidden && strings.Contains(m.Text, "tool_call_budget_low") {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("wrap-up nudges = %d, want 1", nudges)
+	}
+}
+
+func TestToolCallWrapUpThreshold(t *testing.T) {
+	cases := []struct{ max, want int }{
+		{0, 0},   // no cap → disabled
+		{1, 0},   // too small to wrap up before the cap → disabled
+		{3, 0},   // threshold would equal/exceed the cap → disabled
+		{4, 1},   // smallest cap with a usable wrap-up window
+		{5, 2},   // headroom min 3 → 5-3
+		{10, 7},  // 20% headroom
+		{50, 40}, // the reported session's cap
+		{100, 80},
+	}
+	for _, c := range cases {
+		if got := toolCallWrapUpThreshold(c.max); got != c.want {
+			t.Errorf("toolCallWrapUpThreshold(%d) = %d, want %d", c.max, got, c.want)
+		}
+	}
+}
+
 func TestAgentMaxTurnsForcesSummaryAfterToolRound(t *testing.T) {
 	store := NewInMemoryStore()
 	prov := &mockProvider{}
