@@ -3,6 +3,7 @@ package core
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Regression: spawn_subagent must surface the child's full final message as the
@@ -72,5 +73,46 @@ func TestRenderSubagentTextTruncationPointsToChildSession(t *testing.T) {
 	got := RenderToolResultText("spawn_subagent", OutcomeSuccess, "ok", payload)
 	if !strings.Contains(got, "truncated") || !strings.Contains(got, "child-555") {
 		t.Fatalf("truncation notice should reference the child session, got:\n%s", got)
+	}
+}
+
+// subagent_status / cancel_subagent recover a background report. It must render
+// as a clean verbatim body, not buried (and newline-escaped) inside the data:
+// JSON blob the generic renderer would produce.
+func TestRenderSubagentLifecycleSurfacesReportAsCleanBody(t *testing.T) {
+	report := "background done\nline two\nline three"
+	for _, name := range []string{"subagent_status", "cancel_subagent"} {
+		payload := map[string]any{
+			"report":     report,
+			"summary":    "background done",
+			"status":     "completed",
+			"session_id": "child-1",
+		}
+		got := RenderToolResultText(name, OutcomeSuccess, "ok", payload)
+		if !strings.Contains(got, report) {
+			t.Fatalf("%s: report not rendered as clean body, got:\n%s", name, got)
+		}
+		// The multi-line body must appear verbatim, before the metadata trailer.
+		bodyIdx := strings.Index(got, report)
+		dataIdx := strings.Index(got, "\ndata: ")
+		if dataIdx >= 0 && bodyIdx > dataIdx {
+			t.Fatalf("%s: report should precede the data trailer, got:\n%s", name, got)
+		}
+	}
+}
+
+// Regression for the rune-boundary cut: a one-line preview of multi-byte text
+// must never be truncated mid-rune (which would yield invalid UTF-8). This
+// guards the rendering side; subagentSummaryLine (package tasks) produces the
+// preview, but the renderer must also stay rune-clean on any "summary" header.
+func TestRenderSubagentLifecycleHeaderStaysValidUTF8(t *testing.T) {
+	payload := map[string]any{
+		"summary":    strings.Repeat("界", 50), // multi-byte; exercises header path
+		"status":     "running",
+		"session_id": "child-2",
+	}
+	got := RenderToolResultText("subagent_status", OutcomeSuccess, "ok", payload)
+	if !utf8.ValidString(got) {
+		t.Fatalf("rendered text is not valid UTF-8: %q", got)
 	}
 }

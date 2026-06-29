@@ -40,6 +40,8 @@ func RenderToolResultText(name string, outcome ToolOutcome, code string, payload
 		return renderListDirText(payload)
 	case "spawn_subagent":
 		return renderSubagentText(payload)
+	case "subagent_status", "cancel_subagent":
+		return renderSubagentLifecycleText(payload)
 	}
 	return renderGenericText(payload)
 }
@@ -295,6 +297,31 @@ func renderSubagentText(payload map[string]any) string {
 	}
 	// Trailer carries run metadata (session id, tool calls, usage, budget).
 	// The body fields are excluded so the report is never duplicated.
+	if data := remainingData(payload, "report", "summary", "message"); len(data) > 0 {
+		if blob, err := MarshalToolJSON(data); err == nil {
+			b.WriteString("\ndata: " + string(blob))
+		}
+	}
+	return b.String()
+}
+
+// renderSubagentLifecycleText renders subagent_status / cancel_subagent. These
+// are lifecycle records (status, error, timestamps) that ALSO recover the
+// child's report. Like the generic renderer it leads with a status header and
+// trails the metadata blob, but it lifts the report out of that escaped JSON
+// blob into a clean verbatim body — matching how spawn_subagent surfaces it, so
+// a recovered background report reads the same as a freshly-spawned one.
+func renderSubagentLifecycleText(payload map[string]any) string {
+	var b strings.Builder
+	b.WriteString("ok")
+	if s := firstNonEmptyTextLine(payloadString(payload, "summary")); s != "" {
+		b.WriteString(" — " + s)
+	}
+	if report := strings.TrimRight(payloadString(payload, "report"), "\n"); strings.TrimSpace(report) != "" {
+		b.WriteString("\n" + report)
+	}
+	// Body fields are excluded from the trailer so the report is not duplicated
+	// (and re-escaped) alongside the clean body above.
 	if data := remainingData(payload, "report", "summary", "message"); len(data) > 0 {
 		if blob, err := MarshalToolJSON(data); err == nil {
 			b.WriteString("\ndata: " + string(blob))
