@@ -18,7 +18,14 @@ import (
 const (
 	defaultClassifierBaseURL = "https://api.deepseek.com"
 	classifierDefaultTimeout = 10 * time.Second
-	classifierMaxTokens      = 512
+	// classifierMaxTokens gives the classifier ample headroom. The default
+	// model (deepseek-v4-flash) is a reasoning model; without enough budget,
+	// adaptive thinking exhausts the token limit before any content is emitted
+	// (finish_reason=length, content="") and Review fails closed, blocking safe
+	// actions. We disable thinking for the classifier call (see classify) and
+	// keep a 4096 ceiling as a backstop, mirroring Claude Code's auto-mode
+	// classifier budget.
+	classifierMaxTokens = 4096
 )
 
 // Classifier is the auto-review classifier. It reviews tool calls before
@@ -187,6 +194,11 @@ func (c *Classifier) classify(ctx context.Context, systemPrompt, userPrompt stri
 		"temperature":     0,
 		"stream":          false,
 		"response_format": map[string]string{"type": "json_object"},
+		// Disable adaptive thinking: the classifier only needs a small JSON
+		// verdict, and reasoning tokens would otherwise consume the budget and
+		// yield an empty content response. Claude Code's auto-mode classifier
+		// likewise disables thinking for models that allow it.
+		"thinking": map[string]any{"type": "disabled"},
 	}
 
 	body, err := json.Marshal(payload)
