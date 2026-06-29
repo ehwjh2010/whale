@@ -2,15 +2,15 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/usewhale/whale/internal/core"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
+	"github.com/usewhale/whale/internal/tools"
 )
 
 func (a *App) InitializeMCP(ctx context.Context, emit func(whalemcp.StartupEvent)) {
@@ -31,6 +31,10 @@ func (a *App) InitializeMCP(ctx context.Context, emit func(whalemcp.StartupEvent
 		}
 		if ev.Complete {
 			a.freezeMCPToolSignature()
+			if err := a.RestorePromotedTools(); err != nil {
+				// Non-fatal: restored tools couldn't be promoted, agent can still use tool_search.
+				fmt.Fprintf(os.Stderr, "whale: RestorePromotedTools: %v\n", err)
+			}
 		}
 		if emit != nil {
 			emit(ev)
@@ -39,20 +43,144 @@ func (a *App) InitializeMCP(ctx context.Context, emit func(whalemcp.StartupEvent
 }
 
 func (a *App) refreshMCPTools() error {
-	if a == nil {
+	if a == nil || a.mcpManager == nil {
 		return nil
 	}
 	a.toolMu.Lock()
 	defer a.toolMu.Unlock()
 
-	mcpTools := a.mcpManager.Tools()
-	if err := a.guardMCPToolSignatureLocked(mcpTools); err != nil {
+	// Build deferred catalog and wire up tool_search.
+	catalog := a.mcpManager.BuildDeferredCatalog()
+	a.setupDeferredToolSearchLocked(catalog)
+
+	// Rebuild registries: base tools + tool_search (if catalog non-empty).
+	if err := a.rebuildToolRegistriesLocked(); err != nil {
 		return err
 	}
-	base := append([]core.Tool{}, a.baseTools...)
-	base = append(base, mcpTools...)
-	if err := a.baseToolRegistry.ReplaceTools(base); err != nil {
-		return err
+
+	// Freeze signature based on the catalog, not individual tools.
+	if !catalog.Empty() {
+		a.guardDeferredCatalogLocked(catalog)
+	}
+	return nil
+}
+
+// mcpCatalogAdapter adapts mcp.DeferredToolCatalog to tools.DeferredToolCatalog.
+type mcpCatalogAdapter struct {
+	c *whalemcp.DeferredToolCatalog
+}
+
+func (a *mcpCatalogAdapter) Empty() bool { return a.c.Empty() }
+func (a *mcpCatalogAdapter) Search(query string) []tools.DeferredToolEntry {
+	results := a.c.Search(query)
+	out := make([]tools.DeferredToolEntry, len(results))
+	for i, r := range results {
+		out[i] = tools.DeferredToolEntry{
+			Name:        r.Name,
+			Server:      r.Server,
+			Description: r.Description,
+		}
+	}
+	return out
+}
+func (a *mcpCatalogAdapter) Names() []string { return a.c.Names() }
+
+// setupDeferredToolSearchLocked configures the toolset with deferred catalog, promoter, and renderer.
+func (a *App) setupDeferredToolSearchLocked(catalog *whalemcp.DeferredToolCatalog) {
+	if a.toolset == nil {
+		return
+	}
+	var catAdapter tools.DeferredToolCatalog
+	if catalog != nil && !catalog.Empty() {
+		catAdapter = &mcpCatalogAdapter{c: catalog}
+	}
+
+	promoter := a.makeDeferredPromoter()
+	renderer := func() string {
+		return whalemcp.RenderAvailableDeferredTools(catalog)
+	}
+
+	a.toolset.SetDeferredToolSearch(catAdapter, promoter, renderer)
+}
+
+// makeDeferredPromoter returns a function that builds full Tool objects for given names,
+// adds them to registries, and returns their specs.
+func (a *App) makeDeferredPromoter() tools.DeferredToolPromoter {
+	return func(names []string) ([]core.ToolSpec, error) {
+		specs, state, err := a.promoteToolsLocked(names)
+		if err != nil {
+			return nil, err
+		}
+		// Persist outside the lock to avoid filesystem I/O in the critical section.
+		if err := a.writePromotedToolState(state); err != nil {
+			// Non-fatal: promotion succeeded, just couldn't persist.
+			fmt.Fprintf(os.Stderr, "whale: writePromotedToolState: %v\n", err)
+		}
+		return specs, nil
+	}
+}
+
+// promoteToolsLocked builds tools, registers them, and returns specs plus
+// the state that should be persisted. Caller must not hold toolMu.
+func (a *App) promoteToolsLocked(names []string) ([]core.ToolSpec, promotedToolState, error) {
+	a.toolMu.Lock()
+	defer a.toolMu.Unlock()
+
+	built, err := a.mcpManager.BuildTools(names)
+	if err != nil {
+		return nil, promotedToolState{}, err
+	}
+
+	if err := a.baseToolRegistry.AddTools(built); err != nil {
+		return nil, promotedToolState{}, err
+	}
+
+	// Track promoted tools BEFORE rebuild so collectPromotedToolsLocked sees them.
+	if a.promotedTools == nil {
+		a.promotedTools = make(map[string]bool)
+	}
+	for _, t := range built {
+		a.promotedTools[t.Name()] = true
+	}
+
+	if err := a.rebuildToolRegistriesLocked(); err != nil {
+		return nil, promotedToolState{}, err
+	}
+	// Store catalog hash for validation on resume.
+	catalog := a.mcpManager.BuildDeferredCatalog()
+	a.promotedCatalogHash = catalog.Hash()
+
+	state := promotedToolState{
+		CatalogHash: a.promotedCatalogHash,
+	}
+	for name := range a.promotedTools {
+		state.ToolNames = append(state.ToolNames, name)
+	}
+	sort.Strings(state.ToolNames)
+
+	specs := make([]core.ToolSpec, len(built))
+	for i, t := range built {
+		specs[i] = core.DescribeTool(t)
+	}
+	return specs, state, nil
+}
+
+// rebuildToolRegistriesLocked rebuilds all three registries from scratch,
+// preserving any promoted MCP tools that are already in the base registry.
+func (a *App) rebuildToolRegistriesLocked() error {
+	// Collect promoted MCP tools from the existing base registry (those not in toolset).
+	promoted := a.collectPromotedToolsLocked()
+
+	var base []core.Tool
+	if a.toolset != nil {
+		base = append(base, a.toolset.Tools()...)
+	}
+	base = append(base, promoted...)
+
+	if a.baseToolRegistry != nil {
+		if err := a.baseToolRegistry.ReplaceTools(base); err != nil {
+			return err
+		}
 	}
 	subagent := append([]core.Tool{}, base...)
 	subagent = append(subagent, a.pluginTools...)
@@ -65,7 +193,59 @@ func (a *App) refreshMCPTools() error {
 	full = append(full, a.taskTools...)
 	full = append(full, a.goalTools...)
 	full = append(full, a.workflowTools...)
-	return a.toolRegistry.ReplaceTools(full)
+	if a.toolRegistry != nil {
+		return a.toolRegistry.ReplaceTools(full)
+	}
+	return nil
+}
+
+// collectPromotedToolsLocked returns promoted MCP tools from the base registry
+// that are NOT part of the current toolset output (to avoid duplicates).
+// Also prunes promotedTools entries that are no longer in the registry.
+func (a *App) collectPromotedToolsLocked() []core.Tool {
+	if a.baseToolRegistry == nil || a.promotedTools == nil {
+		return nil
+	}
+	toolsetNames := map[string]bool{}
+	if a.toolset != nil {
+		for _, t := range a.toolset.Tools() {
+			toolsetNames[t.Name()] = true
+		}
+	}
+	var promoted []core.Tool
+	var stale []string
+	for name := range a.promotedTools {
+		if toolsetNames[name] {
+			continue // toolset already provides it
+		}
+		if t := a.baseToolRegistry.Get(name); t != nil {
+			promoted = append(promoted, t)
+		} else {
+			stale = append(stale, name)
+		}
+	}
+	for _, name := range stale {
+		delete(a.promotedTools, name)
+	}
+	return promoted
+}
+
+func (a *App) guardDeferredCatalogLocked(catalog *whalemcp.DeferredToolCatalog) {
+	next := catalog.Hash()
+	if a.mcpSig == "" {
+		a.mcpSig = next
+		return
+	}
+	if next == a.mcpSig {
+		return
+	}
+	if !a.mcpSigFrozen {
+		a.mcpSig = next
+		return
+	}
+	// Signature changed after freeze — intentionally a no-op.
+	// Catalog hash can change when servers reconnect; deferring tools on first
+	// use means hash drift is harmless. The agent will discover fresh tools via tool_search.
 }
 
 func (a *App) freezeMCPToolSignature() {
@@ -77,83 +257,81 @@ func (a *App) freezeMCPToolSignature() {
 	a.mcpSigFrozen = true
 }
 
-func (a *App) guardMCPToolSignatureLocked(tools []core.Tool) error {
-	next, payloads, err := mcpToolSetSnapshot(tools)
+// promotedToolState is persisted to the session directory for restore-on-resume.
+type promotedToolState struct {
+	CatalogHash string   `json:"catalog_hash"`
+	ToolNames   []string `json:"tool_names"`
+}
+
+func (a *App) writePromotedToolState(state promotedToolState) error {
+	if a == nil || a.sessionsDir == "" || a.sessionID == "" {
+		return nil
+	}
+	b, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	if a.mcpSig == "" {
-		a.mcpSig = next
-		a.mcpToolPayloads = payloads
-		return nil
+	path := filepath.Join(a.sessionsDir, a.sessionID, "promoted_tools.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
-	if next == a.mcpSig {
-		return nil
-	}
-	if !a.mcpSigFrozen {
-		a.mcpSig = next
-		a.mcpToolPayloads = payloads
-		return nil
-	}
-	return fmt.Errorf("MCP tool set changed after startup: %s; restart Whale to apply updated MCP tools without changing the active provider prefix", mcpToolSetDelta(a.mcpToolPayloads, payloads))
+	return os.WriteFile(path, b, 0644)
 }
 
-func mcpToolSetSignature(tools []core.Tool) (string, error) {
-	sig, _, err := mcpToolSetSnapshot(tools)
-	return sig, err
-}
-
-func mcpToolSetSnapshot(tools []core.Tool) (string, map[string]string, error) {
-	payloads := make([]map[string]any, 0, len(tools))
-	byName := make(map[string]string, len(tools))
-	for _, tool := range tools {
-		payload := core.ProviderToolPayload(tool)
-		payloads = append(payloads, payload)
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return "", nil, fmt.Errorf("hash mcp tool %s: %w", tool.Name(), err)
-		}
-		byName[tool.Name()] = string(b)
+func (a *App) loadPromotedToolState() ([]string, error) {
+	if a == nil || a.sessionsDir == "" || a.sessionID == "" {
+		return nil, nil
 	}
-	b, err := json.Marshal(payloads)
+	path := filepath.Join(a.sessionsDir, a.sessionID, "promoted_tools.json")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", nil, fmt.Errorf("hash mcp tool set: %w", err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), byName, nil
+	var state promotedToolState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	// If catalog hash doesn't match, promoted tools are stale.
+	catalog := a.mcpManager.BuildDeferredCatalog()
+	if catalog.Hash() != state.CatalogHash {
+		return nil, nil // stale — start fresh
+	}
+	a.promotedCatalogHash = state.CatalogHash
+	return state.ToolNames, nil
 }
 
-func mcpToolSetDelta(prev, next map[string]string) string {
-	var added, removed, changed []string
-	for name, payload := range next {
-		if prevPayload, ok := prev[name]; !ok {
-			added = append(added, name)
-		} else if prevPayload != payload {
-			changed = append(changed, name)
-		}
+// RestorePromotedTools re-promotes previously promoted tools on session resume.
+func (a *App) RestorePromotedTools() error {
+	if a == nil || a.mcpManager == nil {
+		return nil
 	}
-	for name := range prev {
-		if _, ok := next[name]; !ok {
-			removed = append(removed, name)
-		}
+	toolNames, err := a.loadPromotedToolState()
+	if err != nil || len(toolNames) == 0 {
+		return err
 	}
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(changed)
-	var parts []string
-	if len(added) > 0 {
-		parts = append(parts, "added "+strings.Join(added, ", "))
+	a.toolMu.Lock()
+	defer a.toolMu.Unlock()
+
+	built, err := a.mcpManager.BuildTools(toolNames)
+	if err != nil {
+		return err
 	}
-	if len(removed) > 0 {
-		parts = append(parts, "removed "+strings.Join(removed, ", "))
+	if err := a.baseToolRegistry.AddTools(built); err != nil {
+		return err
 	}
-	if len(changed) > 0 {
-		parts = append(parts, "changed "+strings.Join(changed, ", "))
+	if err := a.rebuildToolRegistriesLocked(); err != nil {
+		return err
 	}
-	if len(parts) == 0 {
-		return "tool order changed"
+	if a.promotedTools == nil {
+		a.promotedTools = make(map[string]bool)
 	}
-	return strings.Join(parts, "; ")
+	for _, t := range built {
+		a.promotedTools[t.Name()] = true
+	}
+	return nil
 }
 
 func (a *App) MCPStates() []whalemcp.ServerState {

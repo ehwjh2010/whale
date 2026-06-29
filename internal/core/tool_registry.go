@@ -116,6 +116,41 @@ func (r *ToolRegistry) ReplaceTools(tools []Tool) error {
 	return r.replaceToolsLocked(tools)
 }
 
+// AddTools appends new tools to the registry without removing existing ones.
+// Tools whose names already exist are silently skipped.
+func (r *ToolRegistry) AddTools(tools []Tool) error {
+	if r == nil || len(tools) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.addToolsLocked(tools)
+}
+
+func (r *ToolRegistry) addToolsLocked(tools []Tool) error {
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		name := t.Name()
+		if name == "" {
+			continue
+		}
+		if _, ok := r.byName[name]; ok {
+			continue // already present
+		}
+		spec := DescribeTool(t)
+		spec.Parameters = normalizeToolSchema(spec.Parameters)
+		if !isValidToolSpec(spec) {
+			return fmt.Errorf("invalid tool spec for %q", name)
+		}
+		r.byName[name] = t
+		r.specs[name] = spec
+		r.ordered = append(r.ordered, t)
+	}
+	return nil
+}
+
 func (r *ToolRegistry) Snapshot() *ToolRegistry {
 	if r == nil {
 		return NewToolRegistry(nil)
