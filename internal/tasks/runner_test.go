@@ -986,6 +986,7 @@ func TestSpawnSubagentCompletionProgressUsesFinalSummary(t *testing.T) {
 }
 
 func TestSpawnSubagentBackgroundLifecycleStatusAndResultRecovery(t *testing.T) {
+	const bgReport = "background done\nline two\nline three"
 	release := make(chan struct{})
 	factory := func(_ string, _ int) (llm.Provider, error) {
 		return providerFunc(func(ctx context.Context, _ []core.Message, _ []core.Tool) <-chan llm.ProviderEvent {
@@ -998,7 +999,7 @@ func TestSpawnSubagentBackgroundLifecycleStatusAndResultRecovery(t *testing.T) {
 				case <-release:
 					out <- llm.ProviderEvent{Type: llm.EventComplete, Response: &llm.ProviderResponse{
 						FinishReason: core.FinishReasonEndTurn,
-						Content:      "background done",
+						Content:      bgReport,
 					}}
 				}
 			}()
@@ -1043,12 +1044,13 @@ func TestSpawnSubagentBackgroundLifecycleStatusAndResultRecovery(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if final.Status != "completed" || final.Summary != "background done" {
+	if final.Status != "completed" || final.Report != bgReport || final.Summary != "background done" {
 		t.Fatalf("completed meta = %+v", final)
 	}
 }
 
 func TestSpawnSubagentBackgroundDetachesFromTurnProgress(t *testing.T) {
+	const bgReport = "background done\nline two\nline three"
 	release := make(chan struct{})
 	factory := func(_ string, _ int) (llm.Provider, error) {
 		return providerFunc(func(ctx context.Context, _ []core.Message, _ []core.Tool) <-chan llm.ProviderEvent {
@@ -1061,7 +1063,7 @@ func TestSpawnSubagentBackgroundDetachesFromTurnProgress(t *testing.T) {
 				case <-release:
 					out <- llm.ProviderEvent{Type: llm.EventComplete, Response: &llm.ProviderResponse{
 						FinishReason: core.FinishReasonEndTurn,
-						Content:      "background done",
+						Content:      bgReport,
 					}}
 				}
 			}()
@@ -1105,11 +1107,58 @@ func TestSpawnSubagentBackgroundDetachesFromTurnProgress(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if final.Status != "completed" || final.Summary != "background done" {
+	if final.Status != "completed" || final.Report != bgReport || final.Summary != "background done" {
 		t.Fatalf("completed meta = %+v", final)
 	}
 	if len(progress) != 1 {
 		t.Fatalf("background child wrote to parent progress after launch: %+v", progress)
+	}
+}
+
+func TestSubagentStatusToolReturnsFullBackgroundReport(t *testing.T) {
+	const report = "background done\nline two\nline three"
+	dir := t.TempDir()
+	if err := session.SaveSessionMeta(dir, "child-session", session.SessionMeta{
+		Kind:            "subagent",
+		ParentSessionID: "parent-session",
+		Status:          "completed",
+		Report:          report,
+		Summary:         "background done",
+	}); err != nil {
+		t.Fatalf("SaveSessionMeta: %v", err)
+	}
+	r := NewRunner(RunnerConfig{SessionsDir: dir})
+
+	statusRes, err := subagentStatusTool{runner: r}.Run(context.Background(), core.ToolCall{
+		ID:    "status-1",
+		Name:  "subagent_status",
+		Input: `{"session_id":"child-session"}`,
+	})
+	if err != nil {
+		t.Fatalf("subagent_status: %v", err)
+	}
+	statusEnv, ok := core.ParseToolEnvelope(statusRes.ModelText)
+	if !ok {
+		t.Fatalf("parse subagent_status envelope: %s", statusRes.ModelText)
+	}
+	if statusEnv.Data["report"] != report || statusEnv.Data["summary"] != "background done" {
+		t.Fatalf("status data = %+v", statusEnv.Data)
+	}
+
+	cancelRes, err := cancelSubagentTool{runner: r}.Run(context.Background(), core.ToolCall{
+		ID:    "cancel-1",
+		Name:  "cancel_subagent",
+		Input: `{"session_id":"child-session"}`,
+	})
+	if err != nil {
+		t.Fatalf("cancel_subagent: %v", err)
+	}
+	cancelEnv, ok := core.ParseToolEnvelope(cancelRes.ModelText)
+	if !ok {
+		t.Fatalf("parse cancel_subagent envelope: %s", cancelRes.ModelText)
+	}
+	if cancelEnv.Data["report"] != report || cancelEnv.Data["summary"] != "background done" || cancelEnv.Data["cancelled"] != false {
+		t.Fatalf("cancel data = %+v", cancelEnv.Data)
 	}
 }
 
@@ -1639,11 +1688,16 @@ func TestSpawnSubagentMaxTurnsForcesSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnSubagentWithProgress: %v", err)
 	}
-	if !strings.Contains(res.Summary, "forced max turns summary") {
-		t.Fatalf("summary = %q", res.Summary)
+	// The full forced-summary body (banner + model content) travels as Report;
+	// Summary is only a one-line preview derived from it.
+	if !strings.Contains(res.Report, "forced max turns summary") {
+		t.Fatalf("report = %q", res.Report)
+	}
+	if !strings.Contains(res.Report, "auto-interrupted") {
+		t.Fatalf("report missing truncation banner: %q", res.Report)
 	}
 	if !strings.Contains(res.Summary, "auto-interrupted") {
-		t.Fatalf("summary missing truncation banner: %q", res.Summary)
+		t.Fatalf("summary preview missing banner: %q", res.Summary)
 	}
 	if calls != 2 {
 		t.Fatalf("provider calls = %d, want tool turn plus forced summary", calls)

@@ -1012,6 +1012,11 @@ func agentResultValue(res AgentTaskResult) any {
 	if res.StructuredResult != nil {
 		return res.StructuredResult
 	}
+	// Hand scripts the full report; fall back to Summary only for legacy/resumed
+	// entries journaled before Report existed.
+	if res.Report != "" {
+		return res.Report
+	}
 	return res.Summary
 }
 

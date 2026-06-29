@@ -26,6 +26,7 @@ type workflowResumeEntry struct {
 	SourceTaskID   TaskID
 	ChildSessionID string
 	Status         string
+	Report         string
 	Summary        string
 	Structured     any
 	ToolCalls      []string
@@ -57,6 +58,7 @@ func newWorkflowResumeState(source Run) *workflowResumeState {
 			SourceTaskID:   ev.TaskID,
 			ChildSessionID: ev.SessionID,
 			Status:         normalizeStatus(ev.Status, TaskStatusCompleted),
+			Report:         stringAny(ev.Data["report"]),
 			Summary:        ev.Message,
 			Structured:     ev.Data["structured_result"],
 			ToolCalls:      stringSliceAny(ev.Data["tool_calls"]),
@@ -149,6 +151,7 @@ func workflowCachedResult(entry workflowResumeEntry, taskID TaskID) AgentTaskRes
 		TaskID:           taskID,
 		ChildSessionID:   entry.ChildSessionID,
 		Status:           normalizeStatus(entry.Status, TaskStatusCompleted),
+		Report:           entry.Report,
 		Summary:          entry.Summary,
 		StructuredResult: entry.Structured,
 		ToolCalls:        append([]string(nil), entry.ToolCalls...),

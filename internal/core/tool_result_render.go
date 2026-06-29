@@ -38,6 +38,10 @@ func RenderToolResultText(name string, outcome ToolOutcome, code string, payload
 		return renderGrepText(payload)
 	case "list_dir":
 		return renderListDirText(payload)
+	case "spawn_subagent":
+		return renderSubagentText(payload)
+	case "subagent_status", "cancel_subagent":
+		return renderSubagentLifecycleText(payload)
 	}
 	return renderGenericText(payload)
 }
@@ -263,6 +267,76 @@ func renderListDirText(payload map[string]any) string {
 // renderGenericText is the fallback for tools without a dedicated shape:
 // status header, one dominant string field verbatim, then compact JSON of
 // whatever structured data remains (keeps codes/fields greppable).
+// renderSubagentText surfaces a spawn_subagent result the way Claude Code and
+// Codex do: the child's full final message is the PRIMARY body (verbatim, never
+// downgraded to a one-line headline), with run metadata appended as a compact
+// trailer. The generic renderer treats a "summary" field as a one-line header
+// and drops the body entirely — fatal here, where the body IS the deliverable.
+func renderSubagentText(payload map[string]any) string {
+	var b strings.Builder
+	report := strings.TrimRight(payloadString(payload, "report"), "\n")
+	if report == "" {
+		// Back-compat: results produced before the report/summary split folded
+		// the full body into "summary".
+		report = strings.TrimRight(payloadString(payload, "summary"), "\n")
+	}
+	if strings.TrimSpace(report) == "" {
+		// A metadata-only tail reads as "nothing to act on" and some models end
+		// their turn immediately. State the empty result explicitly so the
+		// parent agent has something concrete to react to.
+		b.WriteString("(subagent completed but returned no output)")
+	} else {
+		b.WriteString(report)
+	}
+	if truncated, _ := payload["truncated"].(bool); truncated {
+		if id := payloadString(payload, "child_session_id"); id != "" {
+			fmt.Fprintf(&b, "\n[report truncated — full transcript in child session %s]", id)
+		} else {
+			b.WriteString("\n[report truncated]")
+		}
+	}
+	// Trailer carries run metadata (session id, tool calls, usage, budget).
+	// The body fields are excluded so the report is never duplicated.
+	if data := remainingData(payload, "report", "summary", "message"); len(data) > 0 {
+		if blob, err := MarshalToolJSON(data); err == nil {
+			b.WriteString("\ndata: " + string(blob))
+		}
+	}
+	return b.String()
+}
+
+// renderSubagentLifecycleText renders subagent_status / cancel_subagent. These
+// are lifecycle records (status, error, timestamps) that ALSO recover the
+// child's report. Like the generic renderer it leads with a status header and
+// trails the metadata blob, but it lifts the report out of that escaped JSON
+// blob into a clean verbatim body — matching how spawn_subagent surfaces it, so
+// a recovered background report reads the same as a freshly-spawned one.
+func renderSubagentLifecycleText(payload map[string]any) string {
+	var b strings.Builder
+	b.WriteString("ok")
+	report := strings.TrimRight(payloadString(payload, "report"), "\n")
+	hasReport := strings.TrimSpace(report) != ""
+	// The summary is the report's own first line, so showing it in the header
+	// would duplicate the body's opening line. Keep the header only for
+	// running/empty states where the report is not the signal.
+	if !hasReport {
+		if s := firstNonEmptyTextLine(payloadString(payload, "summary")); s != "" {
+			b.WriteString(" — " + s)
+		}
+	}
+	if hasReport {
+		b.WriteString("\n" + report)
+	}
+	// Body fields are excluded from the trailer so the report is not duplicated
+	// (and re-escaped) alongside the clean body above.
+	if data := remainingData(payload, "report", "summary", "message"); len(data) > 0 {
+		if blob, err := MarshalToolJSON(data); err == nil {
+			b.WriteString("\ndata: " + string(blob))
+		}
+	}
+	return b.String()
+}
+
 func renderGenericText(payload map[string]any) string {
 	var b strings.Builder
 	header := "ok"

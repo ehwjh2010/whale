@@ -36,6 +36,7 @@ type SessionMeta struct {
 	Branch             string    `json:"branch,omitempty"`
 	Title              string    `json:"title,omitempty"`
 	Summary            string    `json:"summary,omitempty"`
+	Report             string    `json:"report,omitempty"`
 	TotalCostUSD       float64   `json:"total_cost_usd,omitempty"`
 	TurnCount          int       `json:"turn_count,omitempty"`
 	Workspace          string    `json:"workspace,omitempty"`
@@ -61,6 +62,7 @@ type SessionMetaPatch struct {
 	Branch             string
 	Title              string
 	Summary            string
+	Report             string
 	TotalCostUSD       *float64
 	TurnCount          *int
 	Workspace          string
@@ -86,6 +88,7 @@ func SessionMetaPatchFromMeta(meta SessionMeta) SessionMetaPatch {
 		Branch:             meta.Branch,
 		Title:              meta.Title,
 		Summary:            meta.Summary,
+		Report:             meta.Report,
 		Workspace:          meta.Workspace,
 		WorktreeName:       meta.WorktreeName,
 		WorktreePath:       meta.WorktreePath,
@@ -198,6 +201,9 @@ func PatchSessionMeta(sessionsDir, sessionID string, patch SessionMetaPatch) (Se
 	}
 	if strings.TrimSpace(patch.Summary) != "" {
 		cur.Summary = strings.TrimSpace(patch.Summary)
+	}
+	if strings.TrimSpace(patch.Report) != "" {
+		cur.Report = strings.TrimSpace(patch.Report)
 	}
 	if patch.TotalCostUSD != nil {
 		cur.TotalCostUSD = *patch.TotalCostUSD

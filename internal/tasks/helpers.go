@@ -94,6 +94,24 @@ func truncateString(v string, limit int) (string, bool) {
 	return v[:limit], true
 }
 
+// subagentSummaryMaxChars bounds the one-line preview derived from a
+// subagent's report, measured in runes. The preview feeds UI/progress/
+// session-list rows only — the full report travels separately as
+// SpawnSubagentResponse.Report.
+const subagentSummaryMaxChars = 200
+
+// subagentSummaryLine collapses a subagent report into a single-line preview.
+// It is deliberately lossy: callers that need the real content must read the
+// report body, never this string. The cut is on a rune boundary so a preview
+// of multi-byte text (e.g. CJK reports) never ends in invalid UTF-8.
+func subagentSummaryLine(report string) string {
+	line := core.FirstLine(report)
+	if runes := []rune(line); len(runes) > subagentSummaryMaxChars {
+		line = string(runes[:subagentSummaryMaxChars])
+	}
+	return line
+}
+
 func marshalSuccess(call core.ToolCall, data map[string]any) (core.ToolResult, error) {
 	content, err := core.MarshalToolEnvelope(core.NewToolSuccessEnvelope(data))
 	if err != nil {

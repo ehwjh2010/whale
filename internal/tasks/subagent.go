@@ -37,23 +37,31 @@ type SpawnSubagentRequest struct {
 }
 
 type SpawnSubagentResponse struct {
-	SessionID         string         `json:"session_id"`
-	Role              string         `json:"role"`
-	Model             string         `json:"model"`
-	PermissionProfile string         `json:"permission_profile"`
-	Status            string         `json:"status"`
-	Summary           string         `json:"summary"`
-	StructuredResult  any            `json:"structured_result,omitempty"`
-	Error             string         `json:"error,omitempty"`
-	Truncated         bool           `json:"truncated"`
-	ToolCalls         []string       `json:"tool_calls,omitempty"`
-	RequestedTools    []string       `json:"requested_tools,omitempty"`
-	ResolvedTools     []string       `json:"resolved_tools,omitempty"`
-	ToolMode          string         `json:"tool_mode,omitempty"`
-	Usage             llm.Usage      `json:"usage,omitempty"`
-	SubagentBudget    SubagentBudget `json:"subagent_budget,omitempty"`
-	DurationMS        int64          `json:"duration_ms"`
-	CompletedAt       string         `json:"completed_at"`
+	SessionID         string `json:"session_id"`
+	Role              string `json:"role"`
+	Model             string `json:"model"`
+	PermissionProfile string `json:"permission_profile"`
+	Status            string `json:"status"`
+	// Report is the subagent's full final assistant message — the primary
+	// payload the parent agent must read. Carried as a first-class field (not
+	// folded into Summary) so the renderer surfaces it as the tool result body
+	// verbatim. Bounded by the runner's report cap; see Truncated.
+	Report string `json:"report,omitempty"`
+	// Summary is a one-line preview of Report for UI/progress/session lists.
+	// It is NOT a substitute for Report and must never be the only thing the
+	// parent agent receives.
+	Summary          string         `json:"summary"`
+	StructuredResult any            `json:"structured_result,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	Truncated        bool           `json:"truncated"`
+	ToolCalls        []string       `json:"tool_calls,omitempty"`
+	RequestedTools   []string       `json:"requested_tools,omitempty"`
+	ResolvedTools    []string       `json:"resolved_tools,omitempty"`
+	ToolMode         string         `json:"tool_mode,omitempty"`
+	Usage            llm.Usage      `json:"usage,omitempty"`
+	SubagentBudget   SubagentBudget `json:"subagent_budget,omitempty"`
+	DurationMS       int64          `json:"duration_ms"`
+	CompletedAt      string         `json:"completed_at"`
 }
 
 type SubagentBudget struct {
@@ -325,7 +333,7 @@ func (r *Runner) SpawnSubagentWithProgress(ctx context.Context, req SpawnSubagen
 			r.patchSubagentMeta(sessionID, session.SessionMeta{Status: "failed", Error: err.Error(), CompletedAt: time.Now().UTC()})
 			return SpawnSubagentResponse{}, &SpawnSubagentError{SessionID: sessionID, Code: "spawn_subagent_failed", Message: err.Error(), Err: err}
 		}
-		var summary string
+		var report string
 		var usage llm.Usage
 		var truncated bool
 		var toolCalls []string
@@ -410,8 +418,8 @@ func (r *Runner) SpawnSubagentWithProgress(ctx context.Context, req SpawnSubagen
 					}
 				case agent.AgentEventTypeDone:
 					if ev.Message != nil {
-						summary, truncated = truncateString(strings.TrimSpace(ev.Message.Text), r.summaryMaxChars)
-						progressSummary := summary
+						report, truncated = truncateString(strings.TrimSpace(ev.Message.Text), r.summaryMaxChars)
+						progressSummary := subagentSummaryLine(report)
 						if progressSummary == "" {
 							progressSummary = "child completed"
 						}
@@ -468,7 +476,7 @@ func (r *Runner) SpawnSubagentWithProgress(ctx context.Context, req SpawnSubagen
 		}
 		if len(req.OutputSchema) > 0 {
 			if _, ok := structuredCapture.get(); !ok {
-				repairPrompt := structuredOutputRepairPrompt(structuredCapture.error(), summary)
+				repairPrompt := structuredOutputRepairPrompt(structuredCapture.error(), report)
 				repairTools, err := core.NewToolRegistryChecked([]core.Tool{structuredOutputTool{schema: req.OutputSchema, capture: structuredCapture}})
 				if err != nil {
 					return fail("structured_output_missing", err)
@@ -499,23 +507,25 @@ func (r *Runner) SpawnSubagentWithProgress(ctx context.Context, req SpawnSubagen
 				return SpawnSubagentResponse{}, &SpawnSubagentError{SessionID: sessionID, Code: code, Message: err.Error(), Err: err}
 			}
 			structuredResult = value
-			if strings.TrimSpace(summary) == "" {
+			if strings.TrimSpace(report) == "" {
 				if b, err := core.MarshalToolJSON(value); err == nil {
-					summary, truncated = truncateString(string(b), r.summaryMaxChars)
+					report, truncated = truncateString(string(b), r.summaryMaxChars)
 				}
 			}
 		}
-		if err := runSubagentStopHooks(runCtx, cfg.Hooks, sessionID, workspace.WorkspaceRoot, role, model, cfg.PermissionProfile, summary, promptHookExecutor, agentHookExecutor); err != nil {
+		summary := subagentSummaryLine(report)
+		if err := runSubagentStopHooks(runCtx, cfg.Hooks, sessionID, workspace.WorkspaceRoot, role, model, cfg.PermissionProfile, report, promptHookExecutor, agentHookExecutor); err != nil {
 			r.patchSubagentMeta(sessionID, session.SessionMeta{Status: "failed", Error: err.Error(), CompletedAt: completedAt})
 			return SpawnSubagentResponse{}, &SpawnSubagentError{SessionID: sessionID, Code: "subagent_stop_hook_failed", Message: err.Error(), Err: err}
 		}
-		r.patchSubagentMeta(sessionID, session.SessionMeta{Status: "completed", Summary: summary, CompletedAt: completedAt})
+		r.patchSubagentMeta(sessionID, session.SessionMeta{Status: "completed", Report: report, Summary: summary, CompletedAt: completedAt})
 		return SpawnSubagentResponse{
 			SessionID:         sessionID,
 			Role:              role,
 			Model:             model,
 			PermissionProfile: cfg.PermissionProfile,
 			Status:            "completed",
+			Report:            report,
 			Summary:           summary,
 			StructuredResult:  structuredResult,
 			Truncated:         truncated,

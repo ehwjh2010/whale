@@ -206,6 +206,7 @@ func (s *TaskScheduler) SpawnAgent(ctx context.Context, actor ActorContext, spec
 		TaskID:           actor.TaskID,
 		ChildSessionID:   res.SessionID,
 		Status:           normalizeStatus(res.Status, TaskStatusCompleted),
+		Report:           res.Report,
 		Summary:          res.Summary,
 		StructuredResult: res.StructuredResult,
 		ToolCalls:        append([]string(nil), res.ToolCalls...),
@@ -213,7 +214,9 @@ func (s *TaskScheduler) SpawnAgent(ctx context.Context, actor ActorContext, spec
 		DurationMS:       res.DurationMS,
 	}
 	if len(spec.OutputSchema) > 0 && result.StructuredResult == nil {
-		structured, err := parseAndValidateStructuredOutput(res.Summary, spec.OutputSchema)
+		// Parse the full report, not the one-line summary: structured JSON is
+		// routinely multi-line and would never survive the preview collapse.
+		structured, err := parseAndValidateStructuredOutput(core.FirstNonEmpty(res.Report, res.Summary), spec.OutputSchema)
 		if err != nil {
 			result.Status = TaskStatusFailed
 			result.Error = err.Error()
@@ -262,6 +265,11 @@ func (s *TaskScheduler) SpawnAgent(ctx context.Context, actor ActorContext, spec
 	}
 	if result.StructuredResult != nil {
 		data["structured_result"] = result.StructuredResult
+	}
+	// Journal the full report so a resumed run hands scripts the same body the
+	// live run did; the event Message stays the one-line preview for display.
+	if strings.TrimSpace(result.Report) != "" {
+		data["report"] = result.Report
 	}
 	if err := s.Store.Append(ctx, RunEvent{
 		RunID:        actor.RunID,
