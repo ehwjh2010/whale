@@ -272,6 +272,9 @@ func (a *App) writePromotedToolState(state promotedToolState) error {
 		return err
 	}
 	path := filepath.Join(a.sessionsDir, a.sessionID, "promoted_tools.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	return os.WriteFile(path, b, 0644)
 }
 
