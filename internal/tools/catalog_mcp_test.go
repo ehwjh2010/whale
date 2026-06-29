@@ -54,9 +54,9 @@ type fakeTool struct {
 	parameters  map[string]any
 }
 
-func (f fakeTool) Name() string                       { return f.name }
-func (f fakeTool) Description() string                 { return f.description }
-func (f fakeTool) Parameters() map[string]any           { return f.parameters }
+func (f fakeTool) Name() string               { return f.name }
+func (f fakeTool) Description() string        { return f.description }
+func (f fakeTool) Parameters() map[string]any { return f.parameters }
 func (f fakeTool) Run(context.Context, core.ToolCall) (core.ToolResult, error) {
 	return core.ToolResult{}, nil
 }
