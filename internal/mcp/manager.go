@@ -305,6 +305,69 @@ func (m *Manager) buildToolsLocked() []core.Tool {
 	return tools
 }
 
+// BuildDeferredCatalog creates a DeferredToolCatalog from the current discovery data.
+// Caller must hold a read lock or ensure the discovery map is stable.
+func (m *Manager) BuildDeferredCatalog() *DeferredToolCatalog {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.buildDeferredCatalogLocked()
+}
+
+func (m *Manager) buildDeferredCatalogLocked() *DeferredToolCatalog {
+	seen := map[string]bool{}
+	metas := make([]DeferredToolMeta, 0)
+	for _, serverName := range sortedDiscoveredServerNames(m.discovery) {
+		for _, tool := range sortedDiscoveredTools(m.discovery[serverName]) {
+			qn := UniqueToolName(QualifyToolName(tool.serverName, tool.toolName), seen)
+			desc := ""
+			if tool.spec != nil {
+				desc = strings.TrimSpace(tool.spec.Description)
+			}
+			if desc == "" {
+				desc = "MCP tool"
+			}
+			metas = append(metas, DeferredToolMeta{
+				Name:        qn,
+				Server:      tool.serverName,
+				Description: desc,
+			})
+		}
+	}
+	return NewDeferredToolCatalog(metas)
+}
+
+// BuildTools constructs full Tool objects for the given qualified names from discovery data.
+func (m *Manager) BuildTools(names []string) ([]core.Tool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var out []core.Tool
+	byName := make(map[string]discoveredTool)
+	seen := map[string]bool{}
+	for _, tools := range m.discovery {
+		for _, tool := range tools {
+			qn := UniqueToolName(QualifyToolName(tool.serverName, tool.toolName), seen)
+			byName[qn] = tool
+		}
+	}
+	for _, name := range names {
+		dt, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("deferred tool %q not found in discovery data", name)
+		}
+		out = append(out, &Tool{
+			manager:        m,
+			serverName:     dt.serverName,
+			toolName:       dt.toolName,
+			registeredName: name,
+			spec:           dt.spec,
+			allowedDirs:    dt.allowedDirs,
+			workspaceRoot:  dt.workspaceRoot,
+		})
+	}
+	return out, nil
+}
+
 func sortedDiscoveredServerNames(discovery map[string][]discoveredTool) []string {
 	names := make([]string, 0, len(discovery))
 	for name := range discovery {

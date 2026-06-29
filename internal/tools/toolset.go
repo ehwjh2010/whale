@@ -37,6 +37,10 @@ type Toolset struct {
 	execApproval        policy.ApprovalFunc
 	sessionIDFunc       func() string
 	foregroundShellWait foregroundShellWaitConfig
+	// Deferred tool search (MCP)
+	deferredCatalog  DeferredToolCatalog
+	deferredPromote  DeferredToolPromoter
+	deferredRenderer DeferredToolRenderer
 }
 
 type externalReadRootsKey struct{}
@@ -158,6 +162,13 @@ func (b *Toolset) SetExtraSkills(extra []*skills.Skill) {
 func (b *Toolset) SetWorktreeContext(worktreeRoot, originalWorkspace string) {
 	b.worktreeRoot = cleanOptionalAbsPath(worktreeRoot)
 	b.originalWorkspace = cleanOptionalAbsPath(originalWorkspace)
+}
+
+// SetDeferredToolSearch configures deferred MCP tool discovery via tool_search.
+func (b *Toolset) SetDeferredToolSearch(catalog DeferredToolCatalog, promote DeferredToolPromoter, render DeferredToolRenderer) {
+	b.deferredCatalog = catalog
+	b.deferredPromote = promote
+	b.deferredRenderer = render
 }
 
 func cleanOptionalAbsPath(path string) string {
