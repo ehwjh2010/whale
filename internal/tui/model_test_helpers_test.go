@@ -13,7 +13,8 @@ import (
 )
 
 type testRuntime struct {
-	events chan protocol.Event
+	events   chan protocol.Event
+	bgShells []protocol.BackgroundShell
 }
 
 func (r *testRuntime) Events() <-chan protocol.Event {
@@ -34,6 +35,9 @@ func (r *testRuntime) ShowReasoning() bool      { return false }
 func (r *testRuntime) SetViewMode(string) error { return nil }
 func (r *testRuntime) SkillSuggestions() []protocol.SkillView {
 	return nil
+}
+func (r *testRuntime) RunningBackgroundShells() []protocol.BackgroundShell {
+	return r.bgShells
 }
 func (r *testRuntime) PrepareOpenCommand(string) (string, *exec.Cmd, error) {
 	return "", nil, os.ErrInvalid

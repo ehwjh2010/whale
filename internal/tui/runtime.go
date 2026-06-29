@@ -18,5 +18,6 @@ type Runtime interface {
 	ShowReasoning() bool
 	SetViewMode(string) error
 	SkillSuggestions() []protocol.SkillView
+	RunningBackgroundShells() []protocol.BackgroundShell
 	PrepareOpenCommand(string) (string, *exec.Cmd, error)
 }

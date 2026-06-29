@@ -45,6 +45,10 @@ func (r *Runtime) PrepareOpenCommand(line string) (string, *exec.Cmd, error) {
 	return r.svc.PrepareOpenCommand(line)
 }
 
+func (r *Runtime) RunningBackgroundShells() []protocol.BackgroundShell {
+	return r.svc.RunningBackgroundShells()
+}
+
 func (r *Runtime) SkillSuggestions() []protocol.SkillView {
 	views := r.svc.SkillSuggestions()
 	out := make([]protocol.SkillView, 0, len(views))

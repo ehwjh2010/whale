@@ -303,6 +303,21 @@ func (s *Service) SkillSuggestions() []skills.SkillView {
 	return s.app.SkillSuggestions()
 }
 
+func (s *Service) RunningBackgroundShells() []protocol.BackgroundShell {
+	if s == nil || s.app == nil {
+		return nil
+	}
+	tasks := s.app.RunningBackgroundShellTasks()
+	if len(tasks) == 0 {
+		return nil
+	}
+	out := make([]protocol.BackgroundShell, 0, len(tasks))
+	for _, task := range tasks {
+		out = append(out, protocol.BackgroundShell{Command: task.Command, Status: task.Status})
+	}
+	return out
+}
+
 func (s *Service) SkillsForManager() []skills.SkillView {
 	if s == nil || s.app == nil {
 		return nil
