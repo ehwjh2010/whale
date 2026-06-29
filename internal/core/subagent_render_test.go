@@ -98,6 +98,26 @@ func TestRenderSubagentLifecycleSurfacesReportAsCleanBody(t *testing.T) {
 		if dataIdx >= 0 && bodyIdx > dataIdx {
 			t.Fatalf("%s: report should precede the data trailer, got:\n%s", name, got)
 		}
+		// The summary header must not duplicate the report's first line: when a
+		// report is present the header is dropped, so "background done" appears
+		// exactly once (as the body's opening line).
+		if n := strings.Count(got, "background done"); n != 1 {
+			t.Fatalf("%s: first line should appear once, got %d:\n%s", name, n, got)
+		}
+	}
+}
+
+// With no report (running/empty state) the summary is the only signal, so it
+// stays in the header.
+func TestRenderSubagentLifecycleKeepsHeaderWhenNoReport(t *testing.T) {
+	payload := map[string]any{
+		"summary":    "still running",
+		"status":     "running",
+		"session_id": "child-3",
+	}
+	got := RenderToolResultText("subagent_status", OutcomeSuccess, "ok", payload)
+	if !strings.Contains(got, "still running") {
+		t.Fatalf("running status should keep summary header, got:\n%s", got)
 	}
 }
 

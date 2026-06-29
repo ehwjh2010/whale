@@ -314,10 +314,17 @@ func renderSubagentText(payload map[string]any) string {
 func renderSubagentLifecycleText(payload map[string]any) string {
 	var b strings.Builder
 	b.WriteString("ok")
-	if s := firstNonEmptyTextLine(payloadString(payload, "summary")); s != "" {
-		b.WriteString(" — " + s)
+	report := strings.TrimRight(payloadString(payload, "report"), "\n")
+	hasReport := strings.TrimSpace(report) != ""
+	// The summary is the report's own first line, so showing it in the header
+	// would duplicate the body's opening line. Keep the header only for
+	// running/empty states where the report is not the signal.
+	if !hasReport {
+		if s := firstNonEmptyTextLine(payloadString(payload, "summary")); s != "" {
+			b.WriteString(" — " + s)
+		}
 	}
-	if report := strings.TrimRight(payloadString(payload, "report"), "\n"); strings.TrimSpace(report) != "" {
+	if hasReport {
 		b.WriteString("\n" + report)
 	}
 	// Body fields are excluded from the trailer so the report is not duplicated
