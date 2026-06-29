@@ -2,8 +2,15 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -11,6 +18,7 @@ import (
 
 	"github.com/usewhale/whale/internal/core"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
+	"github.com/usewhale/whale/internal/tools"
 )
 
 type mcpRuntimeTestInput struct {
@@ -19,6 +27,28 @@ type mcpRuntimeTestInput struct {
 
 type mcpRuntimeTestOutput struct {
 	Message string `json:"message"`
+}
+
+func TestRefreshMCPToolsSetsUpDeferredCatalog(t *testing.T) {
+	mgr := newMCPRuntimeTestManager(t, "echoes a message")
+	app := newMCPRuntimeTestApp(mgr)
+
+	if err := app.refreshMCPTools(); err != nil {
+		t.Fatalf("initial refreshMCPTools: %v", err)
+	}
+	// With deferred loading, MCP tools are NOT directly in the registry.
+	if app.toolRegistry.Get("mcp__runtime__echo") != nil {
+		t.Fatal("MCP tool should NOT be in registry before promotion — it's deferred")
+	}
+	// tool_search should be present if catalog has entries.
+	if app.toolRegistry.Get("tool_search") == nil {
+		t.Fatal("tool_search should be in registry when deferred catalog is non-empty")
+	}
+	// Verify the deferred catalog was built.
+	catalog := app.mcpManager.BuildDeferredCatalog()
+	if catalog.Empty() {
+		t.Fatal("deferred catalog should not be empty")
+	}
 }
 
 func TestRefreshMCPToolsAllowsIdentityAfterFreeze(t *testing.T) {
@@ -32,12 +62,13 @@ func TestRefreshMCPToolsAllowsIdentityAfterFreeze(t *testing.T) {
 	if err := app.refreshMCPTools(); err != nil {
 		t.Fatalf("identity refreshMCPTools: %v", err)
 	}
-	if app.toolRegistry.Get("mcp__runtime__echo") == nil {
-		t.Fatal("mcp tool should remain registered after identity refresh")
+	// tool_search should still be present.
+	if app.toolRegistry.Get("tool_search") == nil {
+		t.Fatal("tool_search should remain registered after identity refresh")
 	}
 }
 
-func TestRefreshMCPToolsRejectsDescriptionChangeAfterFreeze(t *testing.T) {
+func TestRefreshMCPToolsHandlesCatalogChangeAfterFreeze(t *testing.T) {
 	first := newMCPRuntimeTestManager(t, "echoes a message")
 	app := newMCPRuntimeTestApp(first)
 	if err := app.refreshMCPTools(); err != nil {
@@ -45,29 +76,22 @@ func TestRefreshMCPToolsRejectsDescriptionChangeAfterFreeze(t *testing.T) {
 	}
 	app.freezeMCPToolSignature()
 
-	spec, ok := app.toolRegistry.Spec("mcp__runtime__echo")
-	if !ok {
-		t.Fatal("mcp tool spec missing after initial refresh")
-	}
-	if !strings.Contains(spec.Description, "echoes a message") {
-		t.Fatalf("unexpected initial description: %q", spec.Description)
+	catalog := app.mcpManager.BuildDeferredCatalog()
+	if catalog.Empty() {
+		t.Fatal("deferred catalog empty after initial refresh")
 	}
 
+	// second manager has different tool description
 	second := newMCPRuntimeTestManager(t, "echoes a message differently")
 	app.mcpManager = second
 	err := app.refreshMCPTools()
-	if err == nil || !strings.Contains(err.Error(), "restart Whale") {
-		t.Fatalf("expected restart-required error, got %v", err)
+	// With deferred loading, catalog hash changes don't block — it's a no-op.
+	if err != nil {
+		t.Fatalf("catalog description change should not block refresh: %v", err)
 	}
-	if !strings.Contains(err.Error(), "changed mcp__runtime__echo") {
-		t.Fatalf("expected changed tool detail, got %v", err)
-	}
-	spec, ok = app.toolRegistry.Spec("mcp__runtime__echo")
-	if !ok {
-		t.Fatal("mcp tool spec disappeared after rejected refresh")
-	}
-	if strings.Contains(spec.Description, "differently") {
-		t.Fatalf("rejected refresh changed registry description: %q", spec.Description)
+	// tool_search should still be available.
+	if app.toolRegistry.Get("tool_search") == nil {
+		t.Fatal("tool_search disappeared after catalog change")
 	}
 }
 
@@ -123,8 +147,13 @@ func TestMCPToolSetDeltaReportsAddedRemovedChanged(t *testing.T) {
 }
 
 func newMCPRuntimeTestApp(mgr *whalemcp.Manager) *App {
+	ts, err := tools.NewToolset("/tmp")
+	if err != nil {
+		panic(err)
+	}
 	return &App{
 		mcpManager:           mgr,
+		toolset:              ts,
 		baseToolRegistry:     core.NewToolRegistry(nil),
 		subagentToolRegistry: core.NewToolRegistry(nil),
 		toolRegistry:         core.NewToolRegistry(nil),
@@ -171,4 +200,98 @@ func (t mcpSignatureTestTool) Parameters() map[string]any { return t.parameters 
 
 func (t mcpSignatureTestTool) Run(context.Context, core.ToolCall) (core.ToolResult, error) {
 	return core.ToolResult{}, nil
+}
+
+func mcpToolSetSignature(tools []core.Tool) (string, error) {
+	sig, _, err := mcpToolSetSnapshot(tools)
+	return sig, err
+}
+
+func mcpToolSetSnapshot(tools []core.Tool) (string, map[string]string, error) {
+	payloads := make([]map[string]any, 0, len(tools))
+	byName := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		payload := core.ProviderToolPayload(tool)
+		payloads = append(payloads, payload)
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return "", nil, fmt.Errorf("hash mcp tool %s: %w", tool.Name(), err)
+		}
+		byName[tool.Name()] = string(b)
+	}
+	b, err := json.Marshal(payloads)
+	if err != nil {
+		return "", nil, fmt.Errorf("hash mcp tool set: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), byName, nil
+}
+
+func mcpToolSetDelta(prev, next map[string]string) string {
+	var added, removed, changed []string
+	for name, payload := range next {
+		if prevPayload, ok := prev[name]; !ok {
+			added = append(added, name)
+		} else if prevPayload != payload {
+			changed = append(changed, name)
+		}
+	}
+	for name := range prev {
+		if _, ok := next[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
+	var parts []string
+	if len(added) > 0 {
+		parts = append(parts, "added "+strings.Join(added, ", "))
+	}
+	if len(removed) > 0 {
+		parts = append(parts, "removed "+strings.Join(removed, ", "))
+	}
+	if len(changed) > 0 {
+		parts = append(parts, "changed "+strings.Join(changed, ", "))
+	}
+	if len(parts) == 0 {
+		return "tool order changed"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func TestRestorePromotedToolsBuildToolsError(t *testing.T) {
+	mgr := newMCPRuntimeTestManager(t, "echoes a message")
+	app := newMCPRuntimeTestApp(mgr)
+
+	// Set up a session directory with a promoted_tools.json that references
+	// a tool name not present in discovery data.
+	dir := t.TempDir()
+	app.sessionsDir = dir
+	app.sessionID = "test-session"
+
+	catalog := mgr.BuildDeferredCatalog()
+	if catalog.Empty() {
+		t.Fatal("catalog should not be empty")
+	}
+	state := promotedToolState{
+		CatalogHash: catalog.Hash(),
+		ToolNames:   []string{"mcp__runtime__nonexistent"},
+	}
+	b, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	sessionDir := filepath.Join(dir, "test-session")
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "promoted_tools.json"), b, 0644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	err = app.RestorePromotedTools()
+	if err == nil {
+		t.Fatal("expected error when BuildTools fails for non-existent tool, got nil")
+	}
 }

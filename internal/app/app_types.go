@@ -145,8 +145,9 @@ type App struct {
 	contextWindow         int
 	mcpManager            *whalemcp.Manager
 	mcpSig                string
-	mcpToolPayloads       map[string]string
 	mcpSigFrozen          bool
+	promotedTools         map[string]bool   // qualified tool names that have been promoted
+	promotedCatalogHash   string            // catalog hash when tools were promoted
 	pluginManager         *plugins.Manager
 	pluginTools           []core.Tool
 	pluginAgents          []plugins.AgentDefinition

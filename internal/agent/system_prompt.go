@@ -198,10 +198,12 @@ Tool use policy.
 - Mutating tools such as %s, %s, %s, %s with non-read-only commands, workflow launches, and writable subagents may be blocked by mode, policy, or user approval. In read-only modes, use read-only alternatives and do not request writes.
 - %s can be read-only only for safe inspection commands accepted by policy; build, test, install, start, and file-changing shell commands may require approval or be denied.
 - If a tool call is blocked, denied, rejected, or returns a permission/mode error, do not retry the same action through another tool unless the user explicitly asks.
+- MCP tools listed under <available-deferred-tools> are not yet in your schema. Use %s to search and load them before calling.
 `,
 		core.DisplayToolName("read_file"), core.DisplayToolName("list_dir"), core.DisplayToolName("grep"),
 		core.DisplayToolName("search_files"), core.DisplayToolName("web_search"), core.DisplayToolName("web_fetch"),
 		core.DisplayToolName("multi_edit"), core.DisplayToolName("edit"), core.DisplayToolName("write"), core.DisplayToolName("shell_run"),
 		core.DisplayToolName("shell_run"),
+		core.DisplayToolName("tool_search"),
 	))
 }
