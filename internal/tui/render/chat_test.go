@@ -600,6 +600,21 @@ func TestChatLines_StatusRendersAsDistinctCard(t *testing.T) {
 	assertBlankLineBetween(t, lines, "Reasoning only", "visible answer")
 }
 
+// A non-reasoning-only status card (e.g. the pending "User input required"
+// row) must not inherit the hardcoded "Reasoning only" title.
+func TestChatLines_StatusCardOnlyTitlesReasoningOnlyFallback(t *testing.T) {
+	entries := []UIMessage{
+		{Role: "result_running", Kind: KindStatus, Text: "User input required · 1 question"},
+	}
+	joined := joinedPlain(ChatLines(entries, 80))
+	if !strings.Contains(joined, "User input required") {
+		t.Fatalf("expected user-input status body, got: %q", joined)
+	}
+	if strings.Contains(joined, "Reasoning only") {
+		t.Fatalf("user-input status card must not be titled 'Reasoning only', got: %q", joined)
+	}
+}
+
 func TestChatLines_LocalStatusRendersStructuredCard(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)

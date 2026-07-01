@@ -104,19 +104,37 @@ func noticeToneStyle(tone string) lipgloss.Style {
 	}
 }
 
+// reasoningOnlyStatusPrefix mirrors noFinalAnswerStatusPrefix in the tui
+// package. The "Reasoning only" title belongs solely to the no-final-answer
+// fallback; other KindStatus cards (e.g. "User input required") must not
+// inherit it. Kept as a local constant to avoid a render→tui import cycle.
+const reasoningOnlyStatusPrefix = "The model returned reasoning only"
+
+// statusCardTitle returns the bold title for a status card, or "" when the
+// card should render its body without a title.
+func statusCardTitle(m UIMessage) string {
+	if strings.HasPrefix(strings.TrimSpace(m.Text), reasoningOnlyStatusPrefix) {
+		return "Reasoning only"
+	}
+	return ""
+}
+
 func renderStatusCard(m UIMessage, block string, width int) []string {
 	contentWidth := width - 6
 	if contentWidth < 16 {
 		contentWidth = 16
 	}
-	title := lipgloss.NewStyle().
-		Foreground(roleBorderColor(m)).
-		Bold(true).
-		Render("Reasoning only")
 	body := lipgloss.NewStyle().
 		Foreground(tuitheme.Default.Muted).
 		Render(hardWrapRendered(renderEntryText(m.Role, block, contentWidth), contentWidth))
-	rendered := joinTitleAndBody(title, body)
+	rendered := body
+	if title := statusCardTitle(m); title != "" {
+		styledTitle := lipgloss.NewStyle().
+			Foreground(roleBorderColor(m)).
+			Bold(true).
+			Render(title)
+		rendered = joinTitleAndBody(styledTitle, body)
+	}
 	card := spacedCardStyle(width, roleBorderColor(m)).
 		Render(strings.TrimRight(rendered, "\n"))
 	return strings.Split(strings.TrimRight(card, "\n"), "\n")
