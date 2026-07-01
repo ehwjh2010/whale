@@ -47,6 +47,7 @@ type TimelineEvent struct {
 	StartedAt        time.Time
 	ProgressMessages []protocol.ProgressStep
 	Questions        []protocol.UserInputQuestion
+	Answers          []protocol.UserInputAnswer
 	ToolOutcome      string
 	ToolCode         string
 	ToolPayload      map[string]any
@@ -202,6 +203,7 @@ func (b *TurnTimelineBuilder) HandleEvent(ev protocol.Event) {
 		StartedAt:        ev.StartedAt,
 		ProgressMessages: append([]protocol.ProgressStep(nil), ev.ProgressMessages...),
 		Questions:        append([]protocol.UserInputQuestion(nil), ev.Questions...),
+		Answers:          append([]protocol.UserInputAnswer(nil), ev.Answers...),
 		ToolOutcome:      ev.ToolOutcome,
 		ToolCode:         ev.ToolCode,
 		ToolPayload:      ev.ToolPayload,

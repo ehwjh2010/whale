@@ -53,9 +53,160 @@ func TestTimelineRendersUserInputLifecycle(t *testing.T) {
 	next, _ = m.Update(svcMsg(protocol.Event{Kind: protocol.EventUserInputDone, ToolCallID: "input-1", ToolName: "request_user_input", Status: "submitted"}))
 	m = next.(model)
 	rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
-	if !strings.Contains(rendered, "User input submitted") || m.hasPendingLifecycleItems() {
-		t.Fatalf("expected committed user input done notice:\n%s", rendered)
+	if !strings.Contains(rendered, "Questions 0/1 answered") || !strings.Contains(rendered, "Proceed?") || !strings.Contains(rendered, "(unanswered)") || m.hasPendingLifecycleItems() {
+		t.Fatalf("expected committed user input done notice with unanswered question:\n%s", rendered)
 	}
+}
+
+func TestTimelineRendersUserInputDoneWithAnswers(t *testing.T) {
+	t.Run("regular answers", func(t *testing.T) {
+		m := newModel(nil, "", "", "")
+		next, _ := m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputRequired,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions: []protocol.UserInputQuestion{
+				{ID: "q1", Question: "Version?"},
+				{ID: "q2", Question: "Environment?"},
+			},
+		}))
+		m = next.(model)
+		next, _ = m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputDone,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Status:     "submitted",
+			Questions: []protocol.UserInputQuestion{
+				{ID: "q1", Question: "Version?"},
+				{ID: "q2", Question: "Environment?"},
+			},
+			Answers: []protocol.UserInputAnswer{
+				{ID: "q1", Label: "v0.1.28", Value: "v0.1.28"},
+				{ID: "q2", Label: "Staging", Value: "Staging"},
+			},
+		}))
+		m = next.(model)
+		rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
+		if !strings.Contains(rendered, "Questions 2/2 answered") {
+			t.Fatalf("expected 2/2 answered:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "answer: v0.1.28") || !strings.Contains(rendered, "answer: Staging") {
+			t.Fatalf("expected answer labels:\n%s", rendered)
+		}
+		if strings.Contains(rendered, "(unanswered)") {
+			t.Fatalf("unexpected (unanswered):\n%s", rendered)
+		}
+	})
+
+	t.Run("other freeform answer", func(t *testing.T) {
+		m := newModel(nil, "", "", "")
+		next, _ := m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputRequired,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions:  []protocol.UserInputQuestion{{ID: "q", Question: "Version?"}},
+		}))
+		m = next.(model)
+		next, _ = m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputDone,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Status:     "submitted",
+			Questions:  []protocol.UserInputQuestion{{ID: "q", Question: "Version?"}},
+			Answers:    []protocol.UserInputAnswer{{ID: "q", Label: "Other", Value: "v3.0.0-beta1", IsOther: true}},
+		}))
+		m = next.(model)
+		rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
+		if !strings.Contains(rendered, "Questions 1/1 answered") {
+			t.Fatalf("expected 1/1 answered:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "answer: v3.0.0-beta1") {
+			t.Fatalf("expected the freeform value, not 'Other' label:\n%s", rendered)
+		}
+		if strings.Contains(rendered, "answer: Other") {
+			t.Fatalf("should not show 'Other' label for freeform input:\n%s", rendered)
+		}
+	})
+
+	t.Run("partial answers", func(t *testing.T) {
+		m := newModel(nil, "", "", "")
+		next, _ := m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputRequired,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions: []protocol.UserInputQuestion{
+				{ID: "q1", Question: "Pick one"},
+				{ID: "q2", Question: "Pick another"},
+			},
+		}))
+		m = next.(model)
+		next, _ = m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputDone,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Status:     "submitted",
+			Questions: []protocol.UserInputQuestion{
+				{ID: "q1", Question: "Pick one"},
+				{ID: "q2", Question: "Pick another"},
+			},
+			Answers: []protocol.UserInputAnswer{
+				{ID: "q1", Label: "Yes", Value: "Yes"},
+			},
+		}))
+		m = next.(model)
+		rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
+		if !strings.Contains(rendered, "Questions 1/2 answered") {
+			t.Fatalf("expected 1/2 answered:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "answer: Yes") || !strings.Contains(rendered, "(unanswered)") {
+			t.Fatalf("expected one answer and one (unanswered):\n%s", rendered)
+		}
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		m := newModel(nil, "", "", "")
+		next, _ := m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputRequired,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions:  []protocol.UserInputQuestion{{ID: "q", Question: "Proceed?"}},
+		}))
+		m = next.(model)
+		next, _ = m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputDone,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Status:     "canceled",
+		}))
+		m = next.(model)
+		rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
+		if !strings.Contains(rendered, "User input canceled") {
+			t.Fatalf("expected canceled:\n%s", rendered)
+		}
+	})
+
+	t.Run("done with empty status", func(t *testing.T) {
+		m := newModel(nil, "", "", "")
+		next, _ := m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputRequired,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions:  []protocol.UserInputQuestion{{ID: "q", Question: "Proceed?"}},
+		}))
+		m = next.(model)
+		next, _ = m.Update(svcMsg(protocol.Event{
+			Kind:       protocol.EventUserInputDone,
+			ToolCallID: "input-1",
+			ToolName:   "request_user_input",
+			Questions:  []protocol.UserInputQuestion{{ID: "q", Question: "Proceed?"}},
+			Answers:    []protocol.UserInputAnswer{{ID: "q", Label: "Yes", Value: "Yes"}},
+		}))
+		m = next.(model)
+		rendered := strings.Join(tuirender.ChatLines(m.transcript, 100), "\n")
+		if !strings.Contains(rendered, "Questions 1/1 answered") || !strings.Contains(rendered, "answer: Yes") {
+			t.Fatalf("empty status should still render as submitted:\n%s", rendered)
+		}
+	})
 }
 
 func TestTimelineRendersWorkflowResultAfterSnapshot(t *testing.T) {

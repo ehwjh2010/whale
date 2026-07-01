@@ -123,7 +123,7 @@ func (m model) renderUserInputPicker() string {
 	rows = append(rows, pickerTitle(q.Question), "")
 
 	if m.userInput.editingOther {
-		rows = append(rows, "💬 Other — type your answer:", "")
+		rows = append(rows, "Other — type your answer:", "")
 		rows = append(rows, m.userInput.otherInput.View())
 		rows = append(rows, "", pickerHint("(enter submit, esc cancel)"))
 		return strings.Join(rows, "\n")
@@ -139,7 +139,7 @@ func (m model) renderUserInputPicker() string {
 	}
 	// "None of the above" row
 	otherSelected := m.userInput.selectedOption == len(q.Options)
-	rows = append(rows, pickerInlineDescriptionRow("💬 Other", "None of the above — type your own answer", otherSelected, labelWidth))
+	rows = append(rows, pickerInlineDescriptionRow("Other", "None of the above — type your own answer", otherSelected, labelWidth))
 	rows = append(rows, "", pickerHint("(up/down choose, enter confirm, esc cancel)"))
 	return strings.Join(rows, "\n")
 }

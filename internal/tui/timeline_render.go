@@ -521,20 +521,32 @@ func hookTimelineRole(status string) string {
 }
 
 func (m model) timelineUserInputMessage(item timeline.Item) *tuirender.UIMessage {
-	for i := len(item.Events) - 1; i >= 0; i-- {
-		ev := item.Events[i]
-		switch ev.Kind {
-		case protocol.EventUserInputDone:
-			return &tuirender.UIMessage{ID: item.ID, Role: "notice", Kind: tuirender.KindNotice, Text: userInputDoneText(ev)}
-		case protocol.EventUserInputRequired:
-			return &tuirender.UIMessage{ID: item.ID, Role: "result_running", Kind: tuirender.KindStatus, Text: userInputRequiredText(ev)}
+	// Collect questions and answers from events.
+	var questions []protocol.UserInputQuestion
+	var answers []protocol.UserInputAnswer
+	var status string
+	var doneSeen bool
+	for _, ev := range item.Events {
+		if len(ev.Questions) > 0 {
+			questions = ev.Questions
+		}
+		if len(ev.Answers) > 0 {
+			answers = ev.Answers
+		}
+		if ev.Kind == protocol.EventUserInputDone {
+			status = ev.Status
+			doneSeen = true
 		}
 	}
-	return nil
+	// If no done event yet, show pending status.
+	if !doneSeen {
+		return &tuirender.UIMessage{ID: item.ID, Role: "result_running", Kind: tuirender.KindStatus, Text: userInputRequiredTextFromQuestions(questions)}
+	}
+	return &tuirender.UIMessage{ID: item.ID, Role: "notice", Kind: tuirender.KindNotice, Text: userInputDoneText(questions, answers, status)}
 }
 
-func userInputRequiredText(ev timeline.TimelineEvent) string {
-	count := len(ev.Questions)
+func userInputRequiredTextFromQuestions(questions []protocol.UserInputQuestion) string {
+	count := len(questions)
 	if count == 1 {
 		return "User input required · 1 question"
 	}
@@ -544,11 +556,41 @@ func userInputRequiredText(ev timeline.TimelineEvent) string {
 	return "User input required"
 }
 
-func userInputDoneText(ev timeline.TimelineEvent) string {
-	switch strings.ToLower(strings.TrimSpace(ev.Status)) {
-	case "canceled", "cancelled":
+func userInputDoneText(questions []protocol.UserInputQuestion, answers []protocol.UserInputAnswer, status string) string {
+	if strings.EqualFold(strings.TrimSpace(status), "canceled") {
 		return "User input canceled"
-	default:
-		return "User input submitted"
 	}
+	// Build answer map by question ID.
+	answerByID := make(map[string]protocol.UserInputAnswer, len(answers))
+	for _, a := range answers {
+		answerByID[a.ID] = a
+	}
+	total := len(questions)
+	answered := 0
+	for _, q := range questions {
+		if a, ok := answerByID[q.ID]; ok && a.Value != "" {
+			answered++
+		}
+	}
+	var b strings.Builder
+	b.WriteString("• Questions ")
+	b.WriteString(strconv.Itoa(answered))
+	b.WriteByte('/')
+	b.WriteString(strconv.Itoa(total))
+	b.WriteString(" answered")
+	for _, q := range questions {
+		b.WriteString("\n  • ")
+		b.WriteString(q.Question)
+		if a, ok := answerByID[q.ID]; ok && a.Value != "" {
+			b.WriteString("\n    answer: ")
+			if a.IsOther {
+				b.WriteString(a.Value)
+			} else {
+				b.WriteString(a.Label)
+			}
+		} else {
+			b.WriteString("\n    (unanswered)")
+		}
+	}
+	return b.String()
 }

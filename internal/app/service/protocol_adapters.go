@@ -480,6 +480,22 @@ func protocolUserInputOptions(options []core.UserInputOption) []protocol.UserInp
 	return out
 }
 
+func protocolUserInputAnswers(answers []core.UserInputAnswer) []protocol.UserInputAnswer {
+	if len(answers) == 0 {
+		return nil
+	}
+	out := make([]protocol.UserInputAnswer, 0, len(answers))
+	for _, answer := range answers {
+		out = append(out, protocol.UserInputAnswer{
+			ID:      answer.ID,
+			Label:   answer.Label,
+			Value:   answer.Value,
+			IsOther: answer.IsOther,
+		})
+	}
+	return out
+}
+
 func protocolApprovalRequest(req policy.ApprovalRequest, keys []string, metadata map[string]any) *protocol.ApprovalRequest {
 	return &protocol.ApprovalRequest{
 		SessionID: req.SessionID,

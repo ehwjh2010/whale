@@ -268,6 +268,12 @@ func (s *Service) runTurnWith(start func(context.Context) (<-chan agent.AgentEve
 				doneEvent.Status = "canceled"
 			} else {
 				doneEvent.Status = "submitted"
+				if ev.UserInputReq != nil {
+					doneEvent.Questions = protocolUserInputQuestions(ev.UserInputReq.Questions)
+				}
+				if ev.UserInputResp != nil {
+					doneEvent.Answers = protocolUserInputAnswers(ev.UserInputResp.Answers)
+				}
 			}
 			if ev.ToolCall != nil {
 				doneEvent.ToolCallID = ev.ToolCall.ID

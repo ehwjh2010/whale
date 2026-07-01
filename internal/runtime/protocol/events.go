@@ -92,6 +92,7 @@ type Event struct {
 	DurationMS       int64                `json:"duration_ms,omitempty"`
 	ProgressMessages []ProgressStep       `json:"progress_messages,omitempty"`
 	Questions        []UserInputQuestion  `json:"questions,omitempty"`
+	Answers          []UserInputAnswer    `json:"answers,omitempty"`
 	Choices          []string             `json:"choices,omitempty"`
 	Approval         *ApprovalRequest     `json:"approval,omitempty"`
 	LastResponse     string               `json:"last_response,omitempty"`
