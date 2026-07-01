@@ -148,6 +148,7 @@ func (a *Agent) handleRequestUserInput(ctx context.Context, call core.ToolCall, 
 	if !sendAgentEvent(ctx, events, AgentEvent{
 		Type:          AgentEventTypeUserInputSubmitted,
 		ToolCall:      &call,
+		UserInputReq:  &in,
 		UserInputResp: &resp,
 	}) {
 		return core.ToolResult{}, ctx.Err()
