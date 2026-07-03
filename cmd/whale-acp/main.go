@@ -96,6 +96,7 @@ func main() {
 	handler := acp.NewHandler(transport, whaleAgent, msgStore, workspaceRoot)
 	handler.SetToolset(ts)
 	handler.SetPolicy(toolPolicy)
+	handler.SetSessionsDir(sessionsDir)
 	handler.SetSessionIDProvider(&activeSessionID)
 	handler.SetPolicyLoader(func(cwd string) policy.RulePolicy {
 		return loadPermissionPolicy(dataDir, cwd)

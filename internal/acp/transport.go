@@ -39,7 +39,6 @@ type Transport struct {
 
 	// Dispatcher channels.
 	requestCh      chan *dispatchItem
-	responseCh     chan json.RawMessage
 	notificationCh chan json.RawMessage
 	done           chan struct{}
 }
@@ -62,7 +61,6 @@ func NewTransportWithIO(in io.Reader, out io.Writer, errw io.Writer) *Transport 
 		stderr:         errw,
 		pending:        make(map[int64]chan json.RawMessage),
 		requestCh:      make(chan *dispatchItem, 8),
-		responseCh:     make(chan json.RawMessage, 8),
 		notificationCh: make(chan json.RawMessage, 8),
 		done:           make(chan struct{}),
 	}
@@ -90,7 +88,6 @@ func (t *Transport) StartDispatcher() {
 				t.pending = nil
 				t.pendingMu.Unlock()
 				close(t.requestCh)
-				close(t.responseCh)
 				close(t.notificationCh)
 				return
 			}

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/usewhale/whale/internal/agent"
@@ -25,11 +27,20 @@ type Handler struct {
 	toolset         *tools.Toolset
 	activeSessionID *string
 	policy          policy.RulePolicy
+	metaDir         string
 
 	promptMu     sync.Mutex
 	policyLoader func(cwd string) policy.RulePolicy
 	mu           sync.Mutex
 	sessions     map[string]*sessionContext
+}
+
+// sessionMeta is the persisted, cross-restart state for a session. Messages
+// live in the message store; this sidecar captures the context that ACP's
+// session/load request does not carry (cwd, mode).
+type sessionMeta struct {
+	Cwd  string       `json:"cwd,omitempty"`
+	Mode session.Mode `json:"mode,omitempty"`
 }
 
 type sessionContext struct {
@@ -59,6 +70,53 @@ func (h *Handler) SetPolicyLoader(fn func(cwd string) policy.RulePolicy) { h.pol
 func (h *Handler) SetPolicy(p policy.RulePolicy) { h.policy = p }
 
 func (h *Handler) SetSessionIDProvider(sid *string) { h.activeSessionID = sid }
+
+// SetSessionsDir sets the directory used to persist per-session metadata
+// (cwd, mode) so it survives across process restarts and session/load.
+func (h *Handler) SetSessionsDir(dir string) { h.metaDir = dir }
+
+func (h *Handler) metaPath(sessionID string) string {
+	if h.metaDir == "" {
+		return ""
+	}
+	return filepath.Join(h.metaDir, sessionID+".meta.json")
+}
+
+// saveSessionMeta persists a session's cwd and mode. Failures are logged and
+// otherwise ignored — metadata is best-effort and never blocks a request.
+func (h *Handler) saveSessionMeta(sessionID string, meta sessionMeta) {
+	path := h.metaPath(sessionID)
+	if path == "" {
+		return
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		Logger.Printf("failed to marshal session meta for %s: %v", sessionID, err)
+		return
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		Logger.Printf("failed to write session meta for %s: %v", sessionID, err)
+	}
+}
+
+// loadSessionMeta reads persisted metadata for a session. Returns ok=false if
+// no metadata exists (or it cannot be read/parsed).
+func (h *Handler) loadSessionMeta(sessionID string) (sessionMeta, bool) {
+	path := h.metaPath(sessionID)
+	if path == "" {
+		return sessionMeta{}, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return sessionMeta{}, false
+	}
+	var meta sessionMeta
+	if err := json.Unmarshal(b, &meta); err != nil {
+		Logger.Printf("failed to parse session meta for %s: %v", sessionID, err)
+		return sessionMeta{}, false
+	}
+	return meta, true
+}
 
 func (h *Handler) Run() error {
 	h.transport.StartDispatcher()
@@ -196,6 +254,7 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	h.mu.Lock()
 	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, cwd: cwd, mode: session.ModeAgent}
 	h.mu.Unlock()
+	h.saveSessionMeta(whaleSessionID, sessionMeta{Cwd: cwd, Mode: session.ModeAgent})
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
 	h.transport.SendResponse(NewSuccessResponse(req.ID, NewSessionResponse{
 		SessionID: whaleSessionID,
@@ -221,9 +280,22 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 		Logger.Printf("failed to load messages for session %s: %v", params.SessionID, err)
 		messages = nil
 	}
+	// Restore the persisted cwd/mode so a reloaded session operates against its
+	// original workspace rather than the process default. session/load does not
+	// carry cwd, so this sidecar is the only source of truth.
+	cwd := h.defaultCwd
+	mode := session.ModeAgent
+	if meta, ok := h.loadSessionMeta(params.SessionID); ok {
+		if meta.Cwd != "" {
+			cwd = meta.Cwd
+		}
+		if meta.Mode != "" {
+			mode = meta.Mode
+		}
+	}
 	h.mu.Lock()
 	if _, exists := h.sessions[params.SessionID]; !exists {
-		h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, cwd: h.defaultCwd, mode: session.ModeAgent}
+		h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, cwd: cwd, mode: mode}
 	}
 	h.mu.Unlock()
 	for _, msg := range messages {
@@ -269,6 +341,8 @@ func (h *Handler) handleSetMode(req *RPCRequest) *RPCErrorResponse {
 	}
 	h.mu.Lock()
 	sctx, ok := h.sessions[params.SessionID]
+	var savedCwd string
+	var savedMode session.Mode
 	if ok {
 		wm, found := acpToWhaleMode[params.ModeID]
 		if !found {
@@ -276,12 +350,15 @@ func (h *Handler) handleSetMode(req *RPCRequest) *RPCErrorResponse {
 			return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("unknown mode: %s", params.ModeID))
 		}
 		sctx.mode = wm
+		savedCwd = sctx.cwd
+		savedMode = wm
 		Logger.Printf("mode change: session=%s mode=%s", params.SessionID, wm)
 	}
 	h.mu.Unlock()
 	if !ok {
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))
 	}
+	h.saveSessionMeta(params.SessionID, sessionMeta{Cwd: savedCwd, Mode: savedMode})
 	h.transport.SendResponse(NewSuccessResponse(req.ID, SetSessionModeResponse{}))
 	return nil
 }

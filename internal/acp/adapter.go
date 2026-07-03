@@ -152,7 +152,16 @@ func extractText(blocks []ContentBlock) string {
 				parts = append(parts, b.Resource.Text)
 			}
 		case "resource_link":
-			// Resource links are hints, not content — skip.
+			// Resource links reference a file/URI without inlining it. Pass the
+			// reference through as text so a link-only prompt isn't dropped and
+			// the agent can act on the referenced path.
+			if ref := strings.TrimSpace(b.URI); ref != "" {
+				if name := strings.TrimSpace(b.Name); name != "" {
+					parts = append(parts, fmt.Sprintf("@%s (%s)", name, ref))
+				} else {
+					parts = append(parts, "@"+ref)
+				}
+			}
 		default:
 			// Images, audio are not supported yet.
 		}
@@ -177,6 +186,13 @@ func (h *Handler) streamEvents(ctx context.Context, acpSessionID string, events 
 			hadError = true
 			if ev.Err != nil {
 				Logger.Printf("agent error during prompt: %v", ev.Err)
+				// Surface the error to the client — otherwise the user sees
+				// the turn end with no explanation.
+				chunk := AgentMessageChunk(fmt.Sprintf("Error: %v", ev.Err))
+				notif := SessionNotification{SessionID: acpSessionID, Update: chunk}
+				if err := h.transport.SendNotification(MethodSessionUpdate, notif); err != nil {
+					Logger.Printf("failed to send error session/update: %v", err)
+				}
 			}
 			continue
 		case agent.AgentEventTypeTurnCancelled:
