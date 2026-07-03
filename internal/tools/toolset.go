@@ -164,6 +164,13 @@ func (b *Toolset) SetWorktreeContext(worktreeRoot, originalWorkspace string) {
 	b.originalWorkspace = cleanOptionalAbsPath(originalWorkspace)
 }
 
+// SetRoot updates the toolset root directory. All relative file paths and
+// shell commands are resolved relative to this root. Use this when the
+// working directory changes per-session (e.g., ACP multi-root support).
+func (b *Toolset) SetRoot(root string) {
+	b.root = cleanOptionalAbsPath(root)
+}
+
 // SetDeferredToolSearch configures deferred MCP tool discovery via tool_search.
 func (b *Toolset) SetDeferredToolSearch(catalog DeferredToolCatalog, promote DeferredToolPromoter, render DeferredToolRenderer) {
 	b.deferredCatalog = catalog

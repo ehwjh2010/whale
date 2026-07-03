@@ -702,3 +702,10 @@ func (a *Agent) RunSession(ctx context.Context, sessionID, input string) (core.M
 func (a *Agent) RunStream(ctx context.Context, sessionID, input string) (<-chan AgentEvent, error) {
 	return a.RunStreamWithOptions(ctx, sessionID, input, false)
 }
+
+// SetToolPolicy replaces the current tool policy for per-turn workspace updates.
+func (a *Agent) SetToolPolicy(p policy.ToolPolicy) {
+	if p != nil {
+		a.policy = p
+	}
+}

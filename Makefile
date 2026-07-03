@@ -7,7 +7,7 @@ GOCACHE_DIR ?= $(CURDIR)/.gocache
 VERSION ?= dev
 LDFLAGS := -X github.com/usewhale/whale/internal/build.Version=$(VERSION)
 
-.PHONY: help build fmt-check vet test test-tui test-evals test-windows bench-cost bench-cost-live run clean
+.PHONY: help build build-acp fmt-check vet test test-tui test-evals test-windows bench-cost bench-cost-live run clean
 
 export BIN
 export GOCACHE_DIR
@@ -19,6 +19,10 @@ help:
 
 build:
 	@go run ./cmd/dev build
+
+build-acp:
+	mkdir -p bin
+	GOCACHE=$(GOCACHE_DIR) go build -o bin/whale-acp ./cmd/whale-acp/
 
 fmt-check:
 	@go run ./cmd/dev fmt-check
