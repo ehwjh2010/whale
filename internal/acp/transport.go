@@ -211,6 +211,14 @@ func (t *Transport) Done() <-chan struct{} { return t.done }
 func (t *Transport) GetPendingChannel(id int64) chan json.RawMessage {
 	ch := make(chan json.RawMessage, 1)
 	t.pendingMu.Lock()
+	if t.pending == nil {
+		// Dispatcher has already shut down (EOF). Return a closed channel so the
+		// caller observes ok=false ("transport closed") instead of writing to a
+		// nil map and panicking.
+		t.pendingMu.Unlock()
+		close(ch)
+		return ch
+	}
 	t.pending[id] = ch
 	t.pendingMu.Unlock()
 	return ch

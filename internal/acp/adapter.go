@@ -140,7 +140,6 @@ func extractText(blocks []ContentBlock) string {
 // streamEvents reads AgentEvents from the channel and translates them to
 // ACP session/update notifications. Returns the stop reason for the turn.
 func (h *Handler) streamEvents(ctx context.Context, acpSessionID string, events <-chan agent.AgentEvent) StopReason {
-	hadError := false
 	for ev := range events {
 		select {
 		case <-ctx.Done():
@@ -151,7 +150,6 @@ func (h *Handler) streamEvents(ctx context.Context, acpSessionID string, events 
 		// Track terminal events that indicate non-success outcomes.
 		switch ev.Type {
 		case agent.AgentEventTypeError:
-			hadError = true
 			if ev.Err != nil {
 				Logger.Printf("agent error during prompt: %v", ev.Err)
 				// Surface the error to the client — otherwise the user sees
@@ -181,9 +179,9 @@ func (h *Handler) streamEvents(ctx context.Context, acpSessionID string, events 
 			return StopReasonEndTurn
 		}
 	}
-	if hadError {
-		return StopReasonRefusal
-	}
+	// An agent error is surfaced to the user as a message chunk above; the turn
+	// still ends normally. StopReasonRefusal is reserved for the model actually
+	// declining, not for infrastructure/tool failures.
 	return StopReasonEndTurn
 }
 
