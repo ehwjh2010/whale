@@ -311,18 +311,27 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 		Logger.Printf("failed to load messages for session %s: %v", params.SessionID, err)
 		messages = nil
 	}
-	// Restore the persisted cwd/mode so a reloaded session operates against its
-	// original workspace rather than the process default. session/load does not
-	// carry cwd, so this sidecar is the only source of truth.
+	// Determine the working directory and mode for the resumed session.
+	// Precedence: the client-supplied cwd (which the ACP spec requires on
+	// session/load) is authoritative — it reflects where the client currently
+	// wants the session to run. The persisted sidecar is the fallback for
+	// mode (session/load does not carry it) and for cwd when a client omits it.
 	cwd := h.defaultCwd
 	mode := session.ModeAgent
-	if meta, ok := h.loadSessionMeta(params.SessionID); ok {
+	meta, metaOK := h.loadSessionMeta(params.SessionID)
+	if metaOK {
 		if meta.Cwd != "" {
 			cwd = meta.Cwd
 		}
 		if meta.Mode != "" {
 			mode = meta.Mode
 		}
+	}
+	if params.Cwd != "" {
+		if metaOK && meta.Cwd != "" && meta.Cwd != params.Cwd {
+			Logger.Printf("session/load cwd %q differs from persisted %q; honoring request", params.Cwd, meta.Cwd)
+		}
+		cwd = params.Cwd
 	}
 	h.mu.Lock()
 	_, exists := h.sessions[params.SessionID]
@@ -338,6 +347,11 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode}
 		}
 		h.mu.Unlock()
+		// Persist the resolved cwd/mode so a subsequent load (or a restart where
+		// the sidecar was never written) stays consistent with the runtime we
+		// just built. An already-live session keeps its established runtime, so
+		// we only rewrite the sidecar when we actually adopt this cwd.
+		h.saveSessionMeta(params.SessionID, sessionMeta{Cwd: cwd, Mode: mode})
 	}
 	for _, msg := range messages {
 		if update := h.translateMessage(msg); update != nil {

@@ -303,10 +303,15 @@ type SetSessionModeResponse struct{}
 // Session / load
 // ---------------------------------------------------------------------------
 
-// LoadSessionRequest loads an existing session.
+// LoadSessionRequest loads an existing session. Per the ACP spec the client
+// MUST supply cwd and mcpServers (same as session/new); cwd is the authoritative
+// working directory for the resumed session.
 type LoadSessionRequest struct {
-	SessionID string         `json:"sessionId"`
-	Meta      map[string]any `json:"_meta,omitempty"`
+	SessionID             string         `json:"sessionId"`
+	Cwd                   string         `json:"cwd,omitempty"`
+	MCPServers            []MCPServer    `json:"mcpServers,omitempty"`
+	AdditionalDirectories []string       `json:"additionalDirectories,omitempty"`
+	Meta                  map[string]any `json:"_meta,omitempty"`
 }
 
 // LoadSessionResponse returns the messages from a loaded session.
