@@ -183,22 +183,34 @@ func loadPermissionPolicy(dataDir, workspaceRoot string) policy.RulePolicy {
 		defaultPerm = policy.PermissionAsk
 	}
 
-	userRules, err := policy.RulesFromConfig(policy.PermissionConfig{
-		Read:              perm.Read,
-		Edit:              perm.Edit,
-		Shell:             perm.Shell,
-		Terminal:          perm.Terminal,
-		ExternalDirectory: perm.ExternalDirectory,
-		MCP:               perm.MCP,
-		Memory:            perm.Memory,
-		Task:              perm.Task,
-		WebSearch:         perm.WebSearch,
-		WebFetch:          perm.WebFetch,
-		MutatingTool:      perm.MutatingTool,
-	})
-	if err != nil {
-		acp.Logger.Printf("invalid permission rules in config, using defaults: %v", err)
-		userRules = nil
+	// Build user rules per category so a single malformed value only drops the
+	// rules for that one category — not every user rule. Discarding the whole
+	// user policy on one typo would silently revert to the permissive defaults
+	// (edit/shell "*"=allow), which is more permissive than the user intended.
+	categories := []struct {
+		name  string
+		rules map[string]string
+	}{
+		{"read", perm.Read},
+		{"edit", perm.Edit},
+		{"shell", perm.Shell},
+		{"terminal", perm.Terminal},
+		{"external_directory", perm.ExternalDirectory},
+		{"mcp", perm.MCP},
+		{"memory", perm.Memory},
+		{"task", perm.Task},
+		{"web_search", perm.WebSearch},
+		{"web_fetch", perm.WebFetch},
+		{"mutating_tool", perm.MutatingTool},
+	}
+	var userRules []policy.PermissionRule
+	for _, c := range categories {
+		catRules, err := policy.RulesFromMap(c.name, c.rules)
+		if err != nil {
+			acp.Logger.Printf("invalid permission rules in %q, skipping that category: %v", c.name, err)
+			continue
+		}
+		userRules = append(userRules, catRules...)
 	}
 
 	// Default rules first, user rules last. The non-shell evaluator iterates
