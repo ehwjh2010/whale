@@ -73,10 +73,15 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 		return NewErrorResponse(req.ID, ErrCodeInternal, "session runtime not initialized")
 	}
 
-	// Determine run options based on session mode. The toolset root and policy
-	// workspace are already scoped to the session cwd by its runtime.
+	// Determine run options based on session mode, read under the lock: a
+	// queued prompt must observe any mode change (handleSetMode writes
+	// sctx.mode under h.mu) that landed while it waited on promptMu, and an
+	// unlocked read would be a data race.
+	h.mu.Lock()
+	mode := sctx.mode
+	h.mu.Unlock()
 	opts := agent.RunOptions{}
-	switch sctx.mode {
+	switch mode {
 	case session.ModeAsk, session.ModePlan:
 		// Ask/Plan modes allow only read-only tools.
 		opts.ReadOnly = true
