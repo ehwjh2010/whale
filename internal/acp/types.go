@@ -514,10 +514,12 @@ const (
 	ToolCallStatusFailed     ToolCallStatus = "failed"
 )
 
-// ToolCallContent represents content produced by a tool.
+// ToolCallContent represents content produced by a tool. It is a discriminated
+// union keyed by Type: the "content" variant nests a ContentBlock under
+// Content, while the "diff" and "terminal" variants use the flat fields below.
 type ToolCallContent struct {
 	Type       string         `json:"type"`
-	Text       string         `json:"text,omitempty"`
+	Content    *ContentBlock  `json:"content,omitempty"`
 	Path       string         `json:"path,omitempty"`
 	OldText    string         `json:"oldText,omitempty"`
 	NewText    string         `json:"newText,omitempty"`
@@ -525,9 +527,11 @@ type ToolCallContent struct {
 	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
-// ToolContent creates a generic text tool content.
+// ToolContent creates a generic text tool content. Per the ACP schema the
+// "content" variant wraps a full ContentBlock rather than inlining the text.
 func ToolContent(text string) ToolCallContent {
-	return ToolCallContent{Type: "content", Text: text}
+	cb := TextBlock(text)
+	return ToolCallContent{Type: "content", Content: &cb}
 }
 
 // PlanEntry is a single step in an agent execution plan.
@@ -598,7 +602,6 @@ type PermissionOption struct {
 	Kind     string `json:"kind"` // "allow_once", "allow_always", "reject_once"
 }
 
-// RequestPermissionResponse carries the user's choice.
 // PermissionOutcome mirrors the ACP schema's nested outcome wrapper.
 type PermissionOutcome struct {
 	Outcome  string `json:"outcome"`            // "selected" or "cancelled"

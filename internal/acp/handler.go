@@ -282,14 +282,7 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
 	h.transport.SendResponse(NewSuccessResponse(req.ID, NewSessionResponse{
 		SessionID: whaleSessionID,
-		Modes: &SessionModeState{
-			CurrentModeID: "code",
-			AvailableModes: []SessionMode{
-				{ID: "ask", Name: "Ask", Description: "Read-only Q&A without making changes"},
-				{ID: "architect", Name: "Architect", Description: "Design and plan without implementation"},
-				{ID: "code", Name: "Code", Description: "Full agent with tool access"},
-			},
-		},
+		Modes:     sessionModeState("code"),
 	}))
 	return nil
 }
@@ -358,20 +351,27 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	}
 	h.mu.Unlock()
 	h.transport.SendResponse(NewSuccessResponse(req.ID, LoadSessionResponse{
-		Modes: &SessionModeState{
-			CurrentModeID: currentMode,
-			AvailableModes: []SessionMode{
-				{ID: "ask", Name: "Ask", Description: "Read-only Q&A without making changes"},
-				{ID: "architect", Name: "Architect", Description: "Design and plan without implementation"},
-				{ID: "code", Name: "Code", Description: "Full agent with tool access"},
-			},
-		},
+		Modes: sessionModeState(currentMode),
 	}))
 	return nil
 }
 
 var acpToWhaleMode = map[string]session.Mode{
 	"code": session.ModeAgent, "ask": session.ModeAsk, "architect": session.ModePlan,
+}
+
+// sessionModeState returns the agent's advertised mode catalog with the given
+// mode selected as current. Both session/new and session/load report the same
+// set of modes, so the list lives in one place.
+func sessionModeState(currentModeID string) *SessionModeState {
+	return &SessionModeState{
+		CurrentModeID: currentModeID,
+		AvailableModes: []SessionMode{
+			{ID: "ask", Name: "Ask", Description: "Read-only Q&A without making changes"},
+			{ID: "architect", Name: "Architect", Description: "Design and plan without implementation"},
+			{ID: "code", Name: "Code", Description: "Full agent with tool access"},
+		},
+	}
 }
 
 func (h *Handler) handleSetMode(req *RPCRequest) *RPCErrorResponse {
