@@ -393,15 +393,6 @@ func TextBlock(text string) ContentBlock {
 	return ContentBlock{Type: "text", Text: text}
 }
 
-// ResourceLinkBlock creates a resource link content block.
-func ResourceLinkBlock(uri, name string) ContentBlock {
-	return ContentBlock{
-		Type: "resource_link",
-		URI:  uri,
-		Name: name,
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Session update (agent → client notification)
 // ---------------------------------------------------------------------------
@@ -497,14 +488,6 @@ func PlanNotification(entries []PlanEntry) SessionUpdate {
 	}
 }
 
-// CurrentModeNotification creates a SessionUpdate for mode changes.
-func CurrentModeNotification(modeID string) SessionUpdate {
-	return SessionUpdate{
-		SessionUpdate: "current_mode_update",
-		ModeID:        modeID,
-	}
-}
-
 // ToolKind categorizes tool calls for UI treatment.
 type ToolKind string
 
@@ -545,16 +528,6 @@ type ToolCallContent struct {
 // ToolContent creates a generic text tool content.
 func ToolContent(text string) ToolCallContent {
 	return ToolCallContent{Type: "content", Text: text}
-}
-
-// ToolDiffContent creates a diff-style tool content.
-func ToolDiffContent(path, oldText, newText string) ToolCallContent {
-	return ToolCallContent{
-		Type:    "diff",
-		Path:    path,
-		OldText: oldText,
-		NewText: newText,
-	}
 }
 
 // PlanEntry is a single step in an agent execution plan.
