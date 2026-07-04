@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/usewhale/whale/internal/agent"
@@ -92,10 +93,24 @@ func (h *Handler) buildRuntime(acpSessionID, cwd string) (*SessionRuntime, error
 func (h *Handler) SetSessionsDir(dir string) { h.metaDir = dir }
 
 func (h *Handler) metaPath(sessionID string) string {
-	if h.metaDir == "" {
+	if h.metaDir == "" || !isSafeSessionID(sessionID) {
 		return ""
 	}
 	return filepath.Join(h.metaDir, sessionID+".meta.json")
+}
+
+// isSafeSessionID rejects ids that could escape the sessions directory when
+// used as a filename component. Agent-generated ids are "acp-<hex>"; ids from
+// session/load are client-supplied and must be validated before they touch the
+// filesystem (metadata sidecar, message store).
+func isSafeSessionID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	if strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+		return false
+	}
+	return true
 }
 
 // saveSessionMeta persists a session's cwd and mode. Failures are logged and
@@ -184,8 +199,8 @@ func (h *Handler) handleNotificationRaw(raw json.RawMessage) {
 		for _, fn := range cancels {
 			fn()
 		}
+		h.transport.CancelSession(p.SessionID)
 		if len(cancels) > 0 {
-			h.transport.TriggerCancel()
 			Logger.Printf("session cancelled (via notification): %s", p.SessionID)
 		}
 	default:
@@ -283,6 +298,12 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	var params LoadSessionRequest
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+	}
+	// session/load carries a client-supplied id that is used as a filesystem
+	// path component (message store, metadata sidecar); reject ids that could
+	// escape their directory before any file access.
+	if !isSafeSessionID(params.SessionID) {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid sessionId: %q", params.SessionID))
 	}
 	messages, err := h.store.List(context.Background(), params.SessionID)
 	if err != nil {
@@ -391,8 +412,8 @@ func (h *Handler) handleCancel(req *RPCRequest) *RPCErrorResponse {
 	for _, fn := range cancels {
 		fn()
 	}
+	h.transport.CancelSession(params.SessionID)
 	if len(cancels) > 0 {
-		h.transport.TriggerCancel()
 		Logger.Printf("session cancelled: %s", params.SessionID)
 	}
 	if req.IsNotification() {

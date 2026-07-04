@@ -31,11 +31,11 @@ type Transport struct {
 	pendingMu sync.Mutex
 	seq       atomic.Int64
 
-	// activeCancel is called when a cancel notification arrives for the
-	// currently active prompt. It allows CallClientMethod to abort waiting
-	// for a permission response when the user cancels the turn.
-	cancelMu     sync.Mutex
-	activeCancel context.CancelFunc
+	// calls tracks in-flight outbound requests (e.g. session/request_permission)
+	// by their session so CancelSession can abort exactly the waits belonging to
+	// a cancelled session — without disturbing concurrent sessions.
+	callsMu sync.Mutex
+	calls   map[int64]*outboundCall
 
 	// Dispatcher channels.
 	requestCh      chan *dispatchItem
@@ -46,6 +46,13 @@ type Transport struct {
 type dispatchItem struct {
 	Raw json.RawMessage
 	Req *RPCRequest
+}
+
+// outboundCall is an in-flight request to the client, tagged with the session
+// on whose behalf it was sent so it can be cancelled per-session.
+type outboundCall struct {
+	sessionID string
+	cancel    context.CancelFunc
 }
 
 // NewTransport creates a Transport reading from stdin and writing to stdout.
@@ -60,6 +67,7 @@ func NewTransportWithIO(in io.Reader, out io.Writer, errw io.Writer) *Transport 
 		writer:         json.NewEncoder(out),
 		stderr:         errw,
 		pending:        make(map[int64]chan json.RawMessage),
+		calls:          make(map[int64]*outboundCall),
 		requestCh:      make(chan *dispatchItem, 8),
 		notificationCh: make(chan json.RawMessage, 8),
 		done:           make(chan struct{}),
@@ -134,12 +142,11 @@ func (t *Transport) dispatch(raw json.RawMessage) {
 	json.Unmarshal(raw, &envelope)
 
 	if envelope.ID == nil {
-		// Notification: no id.
-		select {
-		case t.notificationCh <- raw:
-		default:
-			Logger.Printf("notification channel full, dropping")
-		}
+		// Notification: no id. Block rather than drop — a lost session/cancel
+		// silently fails to interrupt a turn. Client responses are delivered
+		// inline via the pending map (below), so blocking here cannot deadlock
+		// a handler that is awaiting one.
+		t.notificationCh <- raw
 		return
 	}
 
@@ -184,11 +191,10 @@ func (t *Transport) dispatch(raw json.RawMessage) {
 		Logger.Printf("failed to parse request: %v", err)
 		return
 	}
-	select {
-	case t.requestCh <- &dispatchItem{Raw: raw, Req: req}:
-	default:
-		Logger.Printf("request channel full, dropping %s", req.Method)
-	}
+	// Block rather than drop — a dropped request leaves the client waiting
+	// forever for a response. Responses are delivered inline via the pending
+	// map above, so this cannot deadlock a handler awaiting a client response.
+	t.requestCh <- &dispatchItem{Raw: raw, Req: req}
 }
 
 // Requests returns the channel for incoming client requests.
@@ -241,30 +247,29 @@ func (t *Transport) SendNotification(method string, params interface{}) error {
 	return t.writeJSON(notif)
 }
 
-// CallClientMethod sends a request to the client and waits for the response.
-// It does NOT read stdin — the dispatcher delivers the response via channel.
-// SetActiveCancel stores a context.CancelFunc for the currently active prompt.
-// CallClientMethod uses this to abort waiting for a response when the prompt is cancelled.
-func (t *Transport) SetActiveCancel(cancel context.CancelFunc) {
-	t.cancelMu.Lock()
-	defer t.cancelMu.Unlock()
-	t.activeCancel = cancel
-}
-
-// TriggerCancel invokes the stored active cancel function, if any.
-// context.CancelFunc is idempotent — calling it multiple times is safe.
-func (t *Transport) TriggerCancel() {
-	t.cancelMu.Lock()
-	fn := t.activeCancel
-	t.cancelMu.Unlock()
-	if fn != nil {
+// CancelSession aborts every in-flight outbound request issued on behalf of
+// the given session (e.g. a pending session/request_permission). It leaves
+// requests belonging to other sessions untouched, so cancelling one session
+// never disturbs a prompt awaiting permission in another.
+func (t *Transport) CancelSession(sessionID string) {
+	t.callsMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(t.calls))
+	for _, c := range t.calls {
+		if c.sessionID == sessionID {
+			cancels = append(cancels, c.cancel)
+		}
+	}
+	t.callsMu.Unlock()
+	for _, fn := range cancels {
 		fn()
 	}
 }
 
-// CallClientMethod sends a request to the client and waits for the response.
-// If the active prompt is cancelled (via session/cancel), it returns an error.
-func (t *Transport) CallClientMethod(method string, params interface{}) (*RPCResponse, error) {
+// CallClientMethod sends a request to the client on behalf of sessionID and
+// waits for the response. It does NOT read stdin — the dispatcher delivers the
+// response via channel. If the session is cancelled (via CancelSession) while
+// waiting, it returns an error.
+func (t *Transport) CallClientMethod(sessionID, method string, params interface{}) (*RPCResponse, error) {
 	id := t.seq.Add(1)
 	respCh := t.GetPendingChannel(id)
 	defer t.RemovePending(id)
@@ -284,22 +289,18 @@ func (t *Transport) CallClientMethod(method string, params interface{}) (*RPCRes
 		return nil, fmt.Errorf("call %s: write: %w", method, err)
 	}
 
-	// Create a cancellable context that supersedes any previous one.
-	// The activeCancel is a context.CancelFunc which is idempotent.
+	// Register this call's cancel under its own id, scoped to its session, so
+	// CancelSession can reach exactly this wait and it deregisters exactly
+	// itself on return — independent of any other concurrent call.
 	cancelCtx, cancel := context.WithCancel(context.Background())
-	t.cancelMu.Lock()
-	prev := t.activeCancel
-	t.activeCancel = func() {
-		cancel()
-		if prev != nil {
-			prev()
-		}
-	}
-	t.cancelMu.Unlock()
+	t.callsMu.Lock()
+	t.calls[id] = &outboundCall{sessionID: sessionID, cancel: cancel}
+	t.callsMu.Unlock()
 	defer func() {
-		t.cancelMu.Lock()
-		t.activeCancel = prev
-		t.cancelMu.Unlock()
+		t.callsMu.Lock()
+		delete(t.calls, id)
+		t.callsMu.Unlock()
+		cancel()
 	}()
 
 	// Wait for the response, cancellation, or transport close.

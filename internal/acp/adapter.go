@@ -354,7 +354,7 @@ func NewACPApprovalFunc(transport *Transport) policy.ApprovalFunc {
 			},
 		}
 
-		resp, err := transport.CallClientMethod(MethodSessionRequestPerm, permReq)
+		resp, err := transport.CallClientMethod(req.SessionID, MethodSessionRequestPerm, permReq)
 		if err != nil {
 			Logger.Printf("request_permission failed: %v — denying", err)
 			return policy.ApprovalDeny
