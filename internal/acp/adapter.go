@@ -324,14 +324,17 @@ func toolResultContent(result *core.ToolResult) []ToolCallContent {
 	if result == nil {
 		return nil
 	}
+	// Prefer real output (ModelText, then a string Payload) over the internal
+	// Outcome enum. Falling back to Outcome first would surface the literal word
+	// "success"/"failure" to the editor and leave the Payload branch dead.
 	text := result.ModelText
-	if text == "" {
-		text = string(result.Outcome)
-	}
 	if text == "" && result.Payload != nil {
 		if s, ok := result.Payload.(string); ok {
 			text = s
 		}
+	}
+	if text == "" {
+		text = string(result.Outcome)
 	}
 	return []ToolCallContent{ToolContent(text)}
 }

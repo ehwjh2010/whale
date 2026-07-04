@@ -242,8 +242,16 @@ func (h *Handler) handleInitialize(req *RPCRequest) *RPCErrorResponse {
 			params.ClientCapabilities.FS != nil && params.ClientCapabilities.FS.WriteTextFile,
 			params.ClientCapabilities.Terminal)
 	}
+	// Negotiate: respond with the highest version we support that does not
+	// exceed the client's request. We only speak v1, so any request at or above
+	// it settles on ProtocolVersion; a lower request means the client is too old
+	// and we still answer with our version so it can decide whether to continue.
+	negotiated := uint16(ProtocolVersion)
+	if params.ProtocolVersion != 0 && params.ProtocolVersion < negotiated {
+		Logger.Printf("client requested unsupported protocol version %d; responding with %d", params.ProtocolVersion, negotiated)
+	}
 	h.transport.SendResponse(NewSuccessResponse(req.ID, InitializeResponse{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: negotiated,
 		AgentCapabilities: &AgentCapabilities{
 			LoadSession: true,
 			PromptCapabilities: &PromptCapabilities{

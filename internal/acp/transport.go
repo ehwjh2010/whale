@@ -116,7 +116,7 @@ func (t *Transport) readRaw() (json.RawMessage, error) {
 		}
 		if err := json.Unmarshal(line, &check); err != nil || check.JSONRPC != "2.0" {
 			Logger.Printf("invalid message: %s", string(line))
-			t.writeRawLocked(json.RawMessage(fmt.Sprintf(
+			t.writeRaw(json.RawMessage(fmt.Sprintf(
 				`{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":"Parse error"}}`,
 				ErrCodeParse,
 			)))
@@ -337,8 +337,9 @@ func (t *Transport) writeJSON(v interface{}) error {
 	return t.writer.Encode(v)
 }
 
-// writeRawLocked writes raw bytes to stdout (caller must hold writeMu or use dedicated method).
-func (t *Transport) writeRawLocked(raw json.RawMessage) {
+// writeRaw writes raw bytes to stdout. It acquires writeMu itself, so callers
+// must NOT already hold the lock (sync.Mutex is not reentrant).
+func (t *Transport) writeRaw(raw json.RawMessage) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	t.writer.Encode(json.RawMessage(raw))
