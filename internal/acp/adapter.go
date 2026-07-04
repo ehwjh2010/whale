@@ -35,39 +35,31 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))
 	}
 
-	// Register this prompt's cancel. If another prompt is already active
-	// (sctx.cancel != nil), store as pending. The pending cancel is invoked
-	// by session/cancel and checked after acquiring promptMu.
+	// Register this prompt's cancel under its own identity so session/cancel can
+	// reach it and it deregisters exactly itself on completion — independent of
+	// the order prompts acquire the session's promptMu.
 	ctx, cancel := context.WithCancel(context.Background())
-	isPending := false
+	run := &promptRun{cancel: cancel}
 	h.mu.Lock()
-	if sctx.cancel == nil {
-		sctx.cancel = cancel
-	} else {
-		sctx.pendingCancels = append(sctx.pendingCancels, cancel)
-		isPending = true
+	if sctx.runs == nil {
+		sctx.runs = make(map[*promptRun]struct{})
 	}
+	sctx.runs[run] = struct{}{}
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
-		if !isPending {
-			// Promote the next queued cancel to active.
-			if len(sctx.pendingCancels) > 0 {
-				sctx.cancel = sctx.pendingCancels[0]
-				sctx.pendingCancels = sctx.pendingCancels[1:]
-			} else {
-				sctx.cancel = nil
-			}
-		}
+		delete(sctx.runs, run)
 		h.mu.Unlock()
+		// Always release the turn context so the agent goroutine unwinds even if
+		// we stopped reading its event stream early (e.g. a failed write).
+		cancel()
 	}()
 
-	// Serialize access to the shared toolset — only one prompt runs at a time.
-	h.promptMu.Lock()
-	defer h.promptMu.Unlock()
-
-	// We are now the active prompt. Clear pending flag so cleanup runs on finish.
-	isPending = false
+	// Serialize prompts within this session. Different sessions run concurrently
+	// because each has its own toolset and agent, so a prompt blocked on a
+	// permission dialog only stalls its own session.
+	sctx.promptMu.Lock()
+	defer sctx.promptMu.Unlock()
 
 	// If we were cancelled while queued, exit immediately.
 	if ctx.Err() != nil {
@@ -76,52 +68,23 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 		return nil
 	}
 
-	// Update the active session ID for exec-boundary shell approvals.
-	if h.activeSessionID != nil {
-		*h.activeSessionID = params.SessionID
+	rt := sctx.runtime
+	if rt == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternal, "session runtime not initialized")
 	}
 
-	// Switch toolset root, worktree context, and policy workspace to session cwd.
-	if h.toolset != nil && sctx.cwd != "" {
-		h.toolset.SetRoot(sctx.cwd)
-		h.toolset.SetWorktreeContext(sctx.cwd, sctx.cwd)
-		// Keep the exec-boundary policy workspace root in sync so
-		// external_directory checks use the session's cwd.
-		// Reload permission rules for the session cwd so project-specific
-		// .whale/config.toml rules are honored.
-		sessionPolicy := h.policy
-		if h.policyLoader != nil {
-			sessionPolicy = h.policyLoader(sctx.cwd)
-		}
-		h.toolset.SetExecBoundaryPolicy(policy.RulePolicy{
-			Default:       sessionPolicy.Default,
-			Rules:         sessionPolicy.Rules,
-			WorkspaceRoot: sctx.cwd,
-			WorktreeRoot:  sctx.cwd,
-		})
-		h.agent.SetToolPolicy(policy.RulePolicy{
-			Default:       sessionPolicy.Default,
-			Rules:         sessionPolicy.Rules,
-			WorkspaceRoot: sctx.cwd,
-			WorktreeRoot:  sctx.cwd,
-		})
-		Logger.Printf("switched toolset root to %s for session %s", sctx.cwd, params.SessionID)
-	}
-
-	// Determine run options based on session mode.
+	// Determine run options based on session mode. The toolset root and policy
+	// workspace are already scoped to the session cwd by its runtime.
 	opts := agent.RunOptions{}
 	switch sctx.mode {
-	case session.ModeAsk:
-		opts.ReadOnly = true
-	case session.ModePlan:
-		// Plan mode — we still allow read-only tools.
+	case session.ModeAsk, session.ModePlan:
+		// Ask/Plan modes allow only read-only tools.
 		opts.ReadOnly = true
 	}
 
 	// Start the Whale turn.
-	events, err := h.agent.RunStreamWithTurnOptions(ctx, sctx.whaleSessionID, input, opts)
+	events, err := rt.Agent.RunStreamWithTurnOptions(ctx, sctx.whaleSessionID, input, opts)
 	if err != nil {
-		cancel()
 		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("agent error: %v", err))
 	}
 

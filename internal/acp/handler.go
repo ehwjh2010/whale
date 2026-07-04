@@ -12,28 +12,34 @@ import (
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
-	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/session"
 	"github.com/usewhale/whale/internal/store"
 	"github.com/usewhale/whale/internal/tools"
 )
 
 type Handler struct {
-	transport       *Transport
-	agent           *agent.Agent
-	store           store.MessageStore
-	dataDir         string
-	defaultCwd      string
-	toolset         *tools.Toolset
-	activeSessionID *string
-	policy          policy.RulePolicy
-	metaDir         string
+	transport  *Transport
+	store      store.MessageStore
+	defaultCwd string
+	metaDir    string
+	newRuntime SessionRuntimeFactory
 
-	promptMu     sync.Mutex
-	policyLoader func(cwd string) policy.RulePolicy
-	mu           sync.Mutex
-	sessions     map[string]*sessionContext
+	mu       sync.Mutex
+	sessions map[string]*sessionContext
 }
+
+// SessionRuntime bundles the per-session agent and toolset. Each session gets
+// its own runtime so prompts in different sessions run concurrently without
+// contending on shared, mutable tool state (toolset root, policy workspace).
+// A prompt waiting on a permission dialog only blocks its own session.
+type SessionRuntime struct {
+	Agent   *agent.Agent
+	Toolset *tools.Toolset
+}
+
+// SessionRuntimeFactory builds a runtime scoped to a session's cwd. It is
+// invoked once per session (at session/new or session/load).
+type SessionRuntimeFactory func(acpSessionID, cwd string) (*SessionRuntime, error)
 
 // sessionMeta is the persisted, cross-restart state for a session. Messages
 // live in the message store; this sidecar captures the context that ACP's
@@ -43,33 +49,43 @@ type sessionMeta struct {
 	Mode session.Mode `json:"mode,omitempty"`
 }
 
+// promptRun tracks one in-flight prompt's cancellation. It is held by pointer
+// identity so each prompt deregisters exactly its own cancel on completion —
+// regardless of the order prompts acquire the session's promptMu (Go's mutex
+// does not grant in FIFO order, so a shared "active cancel" slot could point at
+// the wrong prompt).
+type promptRun struct {
+	cancel context.CancelFunc
+}
+
 type sessionContext struct {
 	whaleSessionID string
-	cancel         context.CancelFunc   // active prompt's cancel
-	pendingCancels []context.CancelFunc // queued prompt cancels (LIFO order)
+	runtime        *SessionRuntime
+	promptMu       sync.Mutex              // serializes prompts within this session
+	runs           map[*promptRun]struct{} // in-flight prompts, guarded by Handler.mu
 	cwd            string
 	mode           session.Mode
 }
 
-func NewHandler(transport *Transport, whaleAgent *agent.Agent, msgStore store.MessageStore, defaultCwd string) *Handler {
+func NewHandler(transport *Transport, msgStore store.MessageStore, defaultCwd string) *Handler {
 	return &Handler{
 		transport:  transport,
-		agent:      whaleAgent,
 		store:      msgStore,
 		defaultCwd: defaultCwd,
 		sessions:   make(map[string]*sessionContext),
 	}
 }
 
-func (h *Handler) SetToolset(ts *tools.Toolset) { h.toolset = ts }
+// SetRuntimeFactory sets the factory used to build a per-session agent+toolset.
+func (h *Handler) SetRuntimeFactory(fn SessionRuntimeFactory) { h.newRuntime = fn }
 
-func (h *Handler) SetDataDir(dir string) { h.dataDir = dir }
-
-func (h *Handler) SetPolicyLoader(fn func(cwd string) policy.RulePolicy) { h.policyLoader = fn }
-
-func (h *Handler) SetPolicy(p policy.RulePolicy) { h.policy = p }
-
-func (h *Handler) SetSessionIDProvider(sid *string) { h.activeSessionID = sid }
+// buildRuntime creates a session-scoped runtime via the configured factory.
+func (h *Handler) buildRuntime(acpSessionID, cwd string) (*SessionRuntime, error) {
+	if h.newRuntime == nil {
+		return nil, fmt.Errorf("no session runtime factory configured")
+	}
+	return h.newRuntime(acpSessionID, cwd)
+}
 
 // SetSessionsDir sets the directory used to persist per-session metadata
 // (cwd, mode) so it survives across process restarts and session/load.
@@ -164,18 +180,7 @@ func (h *Handler) handleNotificationRaw(raw json.RawMessage) {
 		if p.SessionID == "" {
 			return
 		}
-		h.mu.Lock()
-		sctx, ok := h.sessions[p.SessionID]
-		var cancels []context.CancelFunc
-		if ok {
-			if sctx.cancel != nil {
-				cancels = append(cancels, sctx.cancel)
-			}
-			if sctx.pendingCancels != nil {
-				cancels = append(cancels, sctx.pendingCancels...)
-			}
-		}
-		h.mu.Unlock()
+		cancels := h.sessionCancels(p.SessionID)
 		for _, fn := range cancels {
 			fn()
 		}
@@ -251,8 +256,12 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	if cwd == "" {
 		cwd = h.defaultCwd
 	}
+	rt, err := h.buildRuntime(whaleSessionID, cwd)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
+	}
 	h.mu.Lock()
-	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, cwd: cwd, mode: session.ModeAgent}
+	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent}
 	h.mu.Unlock()
 	h.saveSessionMeta(whaleSessionID, sessionMeta{Cwd: cwd, Mode: session.ModeAgent})
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
@@ -294,10 +303,20 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 		}
 	}
 	h.mu.Lock()
-	if _, exists := h.sessions[params.SessionID]; !exists {
-		h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, cwd: cwd, mode: mode}
-	}
+	_, exists := h.sessions[params.SessionID]
 	h.mu.Unlock()
+	if !exists {
+		rt, err := h.buildRuntime(params.SessionID, cwd)
+		if err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
+		}
+		h.mu.Lock()
+		// Re-check under lock in case a concurrent load created it first.
+		if _, exists := h.sessions[params.SessionID]; !exists {
+			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode}
+		}
+		h.mu.Unlock()
+	}
 	for _, msg := range messages {
 		if update := h.translateMessage(msg); update != nil {
 			h.transport.SendNotification(MethodSessionUpdate, SessionNotification{
@@ -368,18 +387,7 @@ func (h *Handler) handleCancel(req *RPCRequest) *RPCErrorResponse {
 		SessionID string `json:"sessionId"`
 	}
 	json.Unmarshal(req.Params, &params)
-	h.mu.Lock()
-	sctx, ok := h.sessions[params.SessionID]
-	var cancels []context.CancelFunc
-	if ok {
-		if sctx.cancel != nil {
-			cancels = append(cancels, sctx.cancel)
-		}
-		if sctx.pendingCancels != nil {
-			cancels = append(cancels, sctx.pendingCancels...)
-		}
-	}
-	h.mu.Unlock()
+	cancels := h.sessionCancels(params.SessionID)
 	for _, fn := range cancels {
 		fn()
 	}
@@ -409,6 +417,22 @@ func (h *Handler) translateMessage(msg core.Message) *SessionUpdate {
 		}
 	}
 	return nil
+}
+
+// sessionCancels returns the cancel funcs for every in-flight prompt of a
+// session (active and queued). session/cancel interrupts them all.
+func (h *Handler) sessionCancels(sessionID string) []context.CancelFunc {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sctx, ok := h.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	cancels := make([]context.CancelFunc, 0, len(sctx.runs))
+	for run := range sctx.runs {
+		cancels = append(cancels, run.cancel)
+	}
+	return cancels
 }
 
 func newSessionID() string {

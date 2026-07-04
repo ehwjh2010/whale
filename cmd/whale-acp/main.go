@@ -58,17 +58,6 @@ func main() {
 		acp.Logger.Fatalf("failed to create provider: %v", err)
 	}
 
-	ts, err := tools.NewToolset(workspaceRoot)
-	if err != nil {
-		acp.Logger.Fatalf("failed to create toolset: %v", err)
-	}
-
-	toolPolicy := loadPermissionPolicy(dataDir, workspaceRoot)
-	ts.SetExecBoundaryPolicy(toolPolicy)
-
-	toolList := ts.Tools()
-	acp.Logger.Printf("loaded %d tools", len(toolList))
-
 	sessionsDir := os.Getenv("WHALE_SESSIONS_DIR")
 	if sessionsDir == "" {
 		sessionsDir = filepath.Join(dataDir, "sessions-acp")
@@ -81,26 +70,42 @@ func main() {
 	transport := acp.NewTransport()
 	approvalFn := acp.NewACPApprovalFunc(transport)
 
-	activeSessionID := ""
-	ts.SetExecBoundaryApproval(func() string { return activeSessionID }, approvalFn)
+	// newRuntime builds an agent+toolset scoped to a single session's cwd. Each
+	// session gets its own runtime so prompts in different sessions run
+	// concurrently and a prompt waiting on a permission dialog only blocks its
+	// own session, not every other one sharing the process.
+	newRuntime := func(acpSessionID, cwd string) (*acp.SessionRuntime, error) {
+		ts, err := tools.NewToolset(cwd)
+		if err != nil {
+			return nil, fmt.Errorf("create toolset: %w", err)
+		}
+		ts.SetWorktreeContext(cwd, cwd)
+		p := loadPermissionPolicy(dataDir, cwd)
+		sessionPolicy := policy.RulePolicy{
+			Default:       p.Default,
+			Rules:         p.Rules,
+			WorkspaceRoot: cwd,
+			WorktreeRoot:  cwd,
+		}
+		ts.SetExecBoundaryPolicy(sessionPolicy)
+		sid := acpSessionID
+		ts.SetExecBoundaryApproval(func() string { return sid }, approvalFn)
+		toolList := ts.Tools()
+		whaleAgent := agent.NewAgentWithRegistry(
+			provider,
+			msgStore,
+			core.NewToolRegistry(toolList),
+			agent.WithMaxToolIters(100),
+			agent.WithApprovalFunc(approvalFn),
+			agent.WithToolPolicy(sessionPolicy),
+		)
+		acp.Logger.Printf("session runtime ready: acp=%s cwd=%s tools=%d", acpSessionID, cwd, len(toolList))
+		return &acp.SessionRuntime{Agent: whaleAgent, Toolset: ts}, nil
+	}
 
-	whaleAgent := agent.NewAgentWithRegistry(
-		provider,
-		msgStore,
-		core.NewToolRegistry(toolList),
-		agent.WithMaxToolIters(100),
-		agent.WithApprovalFunc(approvalFn),
-		agent.WithToolPolicy(toolPolicy),
-	)
-
-	handler := acp.NewHandler(transport, whaleAgent, msgStore, workspaceRoot)
-	handler.SetToolset(ts)
-	handler.SetPolicy(toolPolicy)
+	handler := acp.NewHandler(transport, msgStore, workspaceRoot)
+	handler.SetRuntimeFactory(newRuntime)
 	handler.SetSessionsDir(sessionsDir)
-	handler.SetSessionIDProvider(&activeSessionID)
-	handler.SetPolicyLoader(func(cwd string) policy.RulePolicy {
-		return loadPermissionPolicy(dataDir, cwd)
-	})
 
 	acp.Logger.Printf("ready, waiting for ACP messages on stdin")
 
