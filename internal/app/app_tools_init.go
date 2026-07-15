@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/lsp"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
@@ -39,6 +40,13 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	mcpManager := whalemcp.NewManager(mcpConfig, workspaceRoot)
 	pluginTools := pluginOutcome.Tools
 	toolset.SetExtraSkills(pluginOutcome.Skills)
+	lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
+	lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
+	if err == nil && len(lspCfg.Servers) > 0 {
+		lspMgr := lsp.NewManager(lspCfg, workspaceRoot)
+		toolset.SetLSPManager(lspMgr)
+		lspMgr.Warmup()
+	}
 	baseTools := append([]core.Tool{}, toolset.Tools()...)
 	baseToolRegistry, err := core.NewToolRegistryChecked(baseTools)
 	if err != nil {

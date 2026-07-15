@@ -93,6 +93,11 @@ func (b *Toolset) readFile(ctx context.Context, call core.ToolCall) (core.ToolRe
 	if !explicitRange && totalBytes <= defaultReadFileFullMaxBytes {
 		content := strings.Join(lines, "\n")
 		result := readFileResult(rel, "full", total, totalBytes, len(lines), len([]byte(content)), 0, total, false, "", 0, false, false, content, "")
+		if b.symbolOutline != nil {
+			if outline := b.symbolOutline.SymbolOutline(ctx, abs); outline != "" {
+				result["symbol_outline"] = outline
+			}
+		}
 		if readFileFullResultFitsRegistryEnvelope(call.Name, result) {
 			return marshalToolResult(call, result)
 		}
