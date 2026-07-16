@@ -432,14 +432,7 @@ func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
 	ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
 	defer cancel()
 
-	// Ensure enough time; caller ctx may be shorter than startup timeout
-	startCtx := ctx
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < srv.StartupTimeout() {
-		var cancel context.CancelFunc
-		startCtx, cancel = context.WithTimeout(context.Background(), srv.StartupTimeout())
-		defer cancel()
-	}
-	if err := client.Start(startCtx); err != nil {
+	if err := client.Start(ctx); err != nil {
 		m.mu.Lock()
 		if m.clients[name] == client {
 			delete(m.clients, name)
