@@ -360,7 +360,8 @@ func (m *Manager) Warmup() {
 	go func() {
 		defer m.scanning.Store(false)
 		extCache := make(map[string]bool)
-		scanDir(m.workspaceRoot, 0, extCache)
+		var fileCount int
+		scanDir(m.workspaceRoot, 0, extCache, &fileCount, 5, 200)
 		m.mu.Lock()
 		m.extCache = extCache
 		m.mu.Unlock()
@@ -510,11 +511,12 @@ func (m *Manager) hasWorkspaceFiles(srv *ServerConfig) bool {
 	return false
 }
 
-// scanDir walks the workspace tree up to depth 3 (depth 0-2) to discover
-// file extensions. The limit trades off coverage against Warmup cost; deeper
-// files are still served via lazy start on first LSP tool invocation.
-func scanDir(dir string, depth int, result map[string]bool) {
-	if depth > 2 {
+// scanDir walks the workspace tree to discover file extensions, stopping
+// when either maxDepth (5) or maxFiles (200) is reached. Extensions found
+// here let Warmup pre-start relevant servers; files beyond the limits are
+// still covered by lazy start on first LSP tool invocation.
+func scanDir(dir string, depth int, result map[string]bool, fileCount *int, maxDepth, maxFiles int) {
+	if depth > maxDepth || *fileCount >= maxFiles {
 		return
 	}
 	entries, err := os.ReadDir(dir)
@@ -522,14 +524,18 @@ func scanDir(dir string, depth int, result map[string]bool) {
 		return
 	}
 	for _, e := range entries {
+		if *fileCount >= maxFiles {
+			return
+		}
 		if e.IsDir() {
 			n := e.Name()
 			if n == ".git" || n == "node_modules" || n == "vendor" || strings.HasPrefix(n, ".") {
 				continue
 			}
-			scanDir(filepath.Join(dir, n), depth+1, result)
+			scanDir(filepath.Join(dir, n), depth+1, result, fileCount, maxDepth, maxFiles)
 		} else {
 			result[filepath.Ext(e.Name())] = true
+			*fileCount++
 		}
 	}
 }

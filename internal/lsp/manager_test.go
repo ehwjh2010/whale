@@ -213,7 +213,7 @@ func TestScanDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 	os.WriteFile(filepath.Join(dir, ".git", "cfg"), []byte(""), 0644)
 	cache := make(map[string]bool)
-	scanDir(dir, 0, cache)
+	scanDir(dir, 0, cache, new(int), 5, 200)
 	if !cache[".go"] || !cache[".rs"] {
 		t.Fatal("expected .go and .rs")
 	}
@@ -221,18 +221,19 @@ func TestScanDir(t *testing.T) {
 
 func TestScanDir_DepthLimit(t *testing.T) {
 	dir := t.TempDir()
-	d3 := filepath.Join(dir, "a", "b", "c", "d")
-	os.MkdirAll(d3, 0755)
-	os.WriteFile(filepath.Join(d3, "deep.go"), []byte("p"), 0644)
+	// Create a file at depth 6 (0-indexed: a/b/c/d/e/f) — beyond maxDepth 5
+	d6 := filepath.Join(dir, "a", "b", "c", "d", "e", "f")
+	os.MkdirAll(d6, 0755)
+	os.WriteFile(filepath.Join(d6, "deep.go"), []byte("p"), 0644)
 	cache := make(map[string]bool)
-	scanDir(dir, 0, cache)
+	scanDir(dir, 0, cache, new(int), 5, 200)
 	if cache[".go"] {
-		t.Fatal("should not reach depth > 2")
+		t.Fatal("should not reach depth > 5")
 	}
 }
 
 func TestScanDir_MissingDir(t *testing.T) {
-	scanDir("/nope", 0, make(map[string]bool))
+	scanDir("/nope", 0, make(map[string]bool), new(int), 5, 200)
 }
 
 func TestHasWorkspaceFiles(t *testing.T) {
@@ -296,7 +297,7 @@ func TestScanDir_SkipsNodeModules(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "node_modules", "big.js"), []byte("x"), 0644)
 	os.WriteFile(filepath.Join(dir, "pkg.json"), []byte("{}"), 0644)
 	cache := make(map[string]bool)
-	scanDir(dir, 0, cache)
+	scanDir(dir, 0, cache, new(int), 5, 200)
 	if cache[".js"] {
 		t.Fatal("should skip node_modules")
 	}
@@ -312,7 +313,7 @@ func TestScanDir_IgnoresDotDirs(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "src"), 0755)
 	os.WriteFile(filepath.Join(dir, "src", "b.go"), []byte("x"), 0644)
 	cache := make(map[string]bool)
-	scanDir(dir, 0, cache)
+	scanDir(dir, 0, cache, new(int), 5, 200)
 	if !cache[".go"] {
 		t.Fatal("expected .go found")
 	}
