@@ -1,11 +1,13 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func FindServerForConfig(srv *ServerConfig) (string, []string, bool) {
@@ -23,6 +25,9 @@ func FindServerForConfig(srv *ServerConfig) (string, []string, bool) {
 		}
 		candidate := filepath.Join(dir, exe)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			if isRustupProxy(candidate) {
+				continue
+			}
 			return candidate, args, true
 		}
 	}
@@ -79,6 +84,30 @@ func knownInstallDirs() []string {
 		}
 	}
 	return dirs
+}
+
+// isRustupProxy checks whether path is a rust-analyzer binary managed by
+// rustup whose underlying component is not installed. It runs --version
+// and returns true if the binary fails (proxies report "Unknown binary"
+// and exit non-zero).
+func isRustupProxy(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if base != "rust-analyzer.exe" && base != "rust-analyzer" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	cargoBin := filepath.Join(home, ".cargo", "bin")
+	if !strings.HasPrefix(strings.ToLower(path), strings.ToLower(cargoBin)) {
+		return false
+	}
+	// Run --version to verify it's a real binary, not a proxy shim
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "--version")
+	return cmd.Run() != nil
 }
 
 func vscodeExtensionsDir() string {
