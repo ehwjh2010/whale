@@ -159,10 +159,23 @@ func (m *Manager) ClientForFileQuick(filePath string) (*Client, string, error) {
 	return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
 }
 
-// EnsureAllAsync triggers a background start for every configured language
-// server that is not already running. It returns immediately.
+// EnsureAllAsync triggers a background start for configured language servers
+// whose binary was found and that have matching workspace files (or when
+// Warmup hasn't run yet and the cache is empty). It returns immediately.
 func (m *Manager) EnsureAllAsync() {
-	for name := range m.config.Servers {
+	m.mu.RLock()
+	fc := m.foundCache
+	m.mu.RUnlock()
+	for name, srv := range m.config.Servers {
+		// Skip if Warmup has run and found no matching workspace files.
+		if fc != nil {
+			if entry, ok := fc[name]; ok && !entry.found {
+				continue
+			}
+			if !m.hasWorkspaceFiles(srv) {
+				continue
+			}
+		}
 		m.ensureAsync(name)
 	}
 }
@@ -267,7 +280,14 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 	m.mu.RUnlock()
 	if ok {
 		if !client.ready.Load() {
-			if err := client.Start(ctx); err != nil {
+			// Ensure enough time; caller ctx may be shorter than startup timeout
+			startCtx := ctx
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < srv.StartupTimeout() {
+				var cancel context.CancelFunc
+				startCtx, cancel = context.WithTimeout(context.Background(), srv.StartupTimeout())
+				defer cancel()
+			}
+			if err := client.Start(startCtx); err != nil {
 				m.mu.Lock()
 				if m.clients[name] == client {
 					delete(m.clients, name)
@@ -412,7 +432,14 @@ func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
 	ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
 	defer cancel()
 
-	if err := client.Start(ctx); err != nil {
+	// Ensure enough time; caller ctx may be shorter than startup timeout
+	startCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < srv.StartupTimeout() {
+		var cancel context.CancelFunc
+		startCtx, cancel = context.WithTimeout(context.Background(), srv.StartupTimeout())
+		defer cancel()
+	}
+	if err := client.Start(startCtx); err != nil {
 		m.mu.Lock()
 		if m.clients[name] == client {
 			delete(m.clients, name)

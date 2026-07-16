@@ -50,6 +50,7 @@ type Client struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	ready      atomic.Bool          // true after initialize handshake completes
+	readyCh    chan struct{}        // closed when ready becomes true
 	starting   atomic.Bool          // true while a Start() call is in progress
 	exited     atomic.Bool          // true after cmd.Wait() returns
 	stderrDone chan struct{}        // closed when stderr reader goroutine finishes
@@ -69,20 +70,25 @@ func (c *Client) Start(ctx context.Context) error {
 	// Prevent concurrent Start() calls from racing to create the process.
 	if !c.starting.CompareAndSwap(false, true) {
 		c.mu.Unlock()
-		// Another goroutine is already starting. Wait for it.
-		for {
-			if c.ready.Load() {
-				return nil
+		// Another goroutine is already starting. Wait for it via readyCh.
+		c.mu.Lock()
+		ch := c.readyCh
+		c.mu.Unlock()
+		if ch != nil {
+			select {
+			case <-ch:
+				if c.ready.Load() {
+					return nil
+				}
+			case <-time.After(c.startupTimeout):
 			}
-			if !c.starting.Load() {
-				return fmt.Errorf("language server start failed (concurrent attempt completed without becoming ready)")
-			}
-			time.Sleep(50 * time.Millisecond)
 		}
+		return fmt.Errorf("language server start failed")
 	}
 	if c.openDocs == nil {
 		c.openDocs = make(map[string]time.Time)
 	}
+	c.readyCh = make(chan struct{})
 	c.mu.Unlock()
 	defer c.starting.Store(false)
 
@@ -217,6 +223,7 @@ func (c *Client) Start(ctx context.Context) error {
 	c.caps = &initResult.Capabilities
 	c.mu.Unlock()
 	c.ready.Store(true)
+	close(c.readyCh)
 	return nil
 }
 
