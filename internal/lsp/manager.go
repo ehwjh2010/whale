@@ -24,7 +24,6 @@ type foundEntry struct {
 	found bool
 }
 
-
 // Manager coordinates the lifecycle of language servers. It is created via
 // NewManager(cfg, workspaceRoot) and registered with the toolset via
 // tools.Toolset.SetLSPManager(mgr). Typically the application layer
@@ -101,11 +100,13 @@ func (m *Manager) ClientForLanguage(ctx context.Context, langName string) (*Clie
 // ReadyClientForFile returns a ready LSP client for the given file path.
 // If the server for this file's extension hasn't started or is unhealthy,
 // returns nil and false. The returned string is the server name for error
-// messages. Use this from LSP tool handlers that need fast checks without
-// blocking on startup.
+// messages.
+//
+// As a side effect, if the server is configured but not running, this
+// triggers a background start so the next call is likely to succeed.
 func (m *Manager) ReadyClientForFile(filePath string) (*Client, string, bool) {
 	ext := filepath.Ext(filePath)
-	srv, name, ok := m.config.ForExtension(ext)
+	_, name, ok := m.config.ForExtension(ext)
 	if !ok {
 		return nil, "", false
 	}
@@ -113,10 +114,129 @@ func (m *Manager) ReadyClientForFile(filePath string) (*Client, string, bool) {
 	client, ok := m.clients[name]
 	m.mu.RUnlock()
 	if !ok || client == nil || !client.alive() {
+		m.ensureAsync(name)
 		return nil, name, false
 	}
-	_ = srv
 	return client, name, true
+}
+
+// ClientForFileQuick returns a ready LSP client for the given file path.
+// On the first call for a language, it triggers a background start and
+// waits up to 3 seconds for the server to become ready. On subsequent
+// calls while the server is still warming up, it returns immediately
+// with an error so the model retries later.
+func (m *Manager) ClientForFileQuick(filePath string) (*Client, string, error) {
+	ext := filepath.Ext(filePath)
+	_, name, ok := m.config.ForExtension(ext)
+	if !ok {
+		return nil, "", fmt.Errorf("no LSP server for %q files", ext)
+	}
+
+	// Fast path: already ready
+	client, _, ready := m.ReadyClientForFile(filePath)
+	if ready {
+		return client, name, nil
+	}
+
+	// Already starting from a previous attempt? Fail fast.
+	m.mu.RLock()
+	existing := m.clients[name]
+	m.mu.RUnlock()
+	if existing != nil && existing.isStarting() {
+		return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
+	}
+
+	// Fresh start — wait briefly (ReadyClientForFile already triggered ensureAsync)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		client, _, ready = m.ReadyClientForFile(filePath)
+		if ready {
+			return client, name, nil
+		}
+	}
+	return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
+}
+
+// ensureAsync triggers a background start for the named language server
+// if it is not already running or starting. Safe to call concurrently.
+func (m *Manager) ensureAsync(name string) {
+	srv, ok := m.config.Servers[name]
+	if !ok {
+		return
+	}
+	m.mu.RLock()
+	client, ok := m.clients[name]
+	m.mu.RUnlock()
+	if ok && (client.alive() || client.isStarting()) {
+		return
+	}
+	m.backgroundStart(name, srv)
+}
+
+// newClient creates a Client pre-populated with server config values.
+func (m *Manager) newClient(name string, srv *ServerConfig, command string, args []string) *Client {
+	client := &Client{
+		language:              name,
+		command:               command,
+		args:                  args,
+		rootURI:               PathToURI(m.workspaceRoot),
+		openDocs:              make(map[string]bool),
+		env:                   srv.Env,
+		initializationOptions: srv.InitializationOptions,
+		settings:              srv.Settings,
+		startupTimeout:        srv.StartupTimeout(),
+		shutdownTimeout:       srv.ShutdownTimeout(),
+	}
+	return client
+}
+
+// maybeMonitorRestart starts a background goroutine that watches the client
+// for crashes and restarts it when configured.
+func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Client) {
+	if !srv.ShouldRestartOnCrash() {
+		return
+	}
+	go func() {
+		<-client.done
+		for attempt := 0; srv.MaxRestarts == 0 || attempt < srv.MaxRestarts; attempt++ {
+			if attempt > 0 {
+				time.Sleep(1 * time.Second)
+			}
+			m.mu.Lock()
+			if m.clients[name] != client {
+				m.mu.Unlock()
+				return // replaced by a newer client
+			}
+			m.mu.Unlock()
+			// Only restart if the crashed client is still the one in the map
+			command, args, found := FindServerForConfig(srv)
+			if !found {
+				return
+			}
+			newClient := m.newClient(name, srv, command, args)
+			m.mu.Lock()
+			if m.clients[name] != client {
+				m.mu.Unlock()
+				newClient.Close()
+				return
+			}
+			m.clients[name] = newClient
+			m.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
+			if err := newClient.Start(ctx); err != nil {
+				cancel()
+				m.setStatus(name, "failed", command, err.Error())
+				continue
+			}
+			cancel()
+			m.setStatus(name, "loaded", command, "")
+			// Wait for the new client to crash, then loop to restart again
+			<-newClient.done
+			client = newClient
+			attempt = -1 // reset counter for new client
+		}
+	}()
 }
 
 func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerConfig) (*Client, error) {
@@ -162,14 +282,7 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return nil, fmt.Errorf("%s not found. Install it: %s", srv.Command, help)
 	}
 
-	client = &Client{
-		language: name,
-		command:  command,
-		args:     args,
-		rootURI:  PathToURI(m.workspaceRoot),
-		openDocs: make(map[string]bool),
-	}
-
+	client = m.newClient(name, srv, command, args)
 	m.clients[name] = client
 	created := client
 	m.mu.Unlock()
@@ -184,6 +297,7 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return nil, fmt.Errorf("start %s: %w", name, err)
 	}
 	m.setStatus(name, "loaded", command, "")
+	m.maybeMonitorRestart(name, srv, client)
 	return client, nil
 }
 
@@ -251,7 +365,7 @@ func (m *Manager) Warmup() {
 func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
 	m.mu.RLock()
 	client, ok := m.clients[name]
-	if ok && client.alive() {
+	if ok && (client.alive() || client.isStarting()) {
 		m.mu.RUnlock()
 		return
 	}
@@ -262,23 +376,17 @@ func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
 		return
 	}
 
-	client = &Client{
-		language: name,
-		command:  command,
-		args:     args,
-		rootURI:  PathToURI(m.workspaceRoot),
-		openDocs: make(map[string]bool),
-	}
+	client = m.newClient(name, srv, command, args)
 
 	m.mu.Lock()
-	if existing, ok := m.clients[name]; ok && existing.alive() {
+	if existing, ok := m.clients[name]; ok && (existing.alive() || existing.isStarting()) {
 		m.mu.Unlock()
 		return
 	}
 	m.clients[name] = client
 	m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
 	defer cancel()
 
 	if err := client.Start(ctx); err != nil {
@@ -291,6 +399,7 @@ func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
 		return
 	}
 	m.setStatus(name, "loaded", command, "")
+	m.maybeMonitorRestart(name, srv, client)
 }
 
 func (m *Manager) SymbolOutline(ctx context.Context, filePath string) string {

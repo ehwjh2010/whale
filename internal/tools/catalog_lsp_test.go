@@ -15,7 +15,7 @@ import (
 
 type mockClient struct {
 	goToDefFn      func(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
-	findRefsFn     func(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
+	findRefsFn     func(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]lsp.Location, error)
 	hoverFn        func(ctx context.Context, uri string, line, character int) (*lsp.HoverResult, error)
 	docSymbolsFn   func(ctx context.Context, uri string) ([]lsp.DocumentSymbol, error)
 	workspaceSymFn func(ctx context.Context, query string) ([]lsp.SymbolInformation, error)
@@ -28,9 +28,9 @@ func (m *mockClient) GoToDefinition(ctx context.Context, uri string, line, chara
 	return nil, errors.New("not implemented")
 }
 
-func (m *mockClient) FindReferences(ctx context.Context, uri string, line, character int) ([]lsp.Location, error) {
+func (m *mockClient) FindReferences(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]lsp.Location, error) {
 	if m.findRefsFn != nil {
-		return m.findRefsFn(ctx, uri, line, character)
+		return m.findRefsFn(ctx, uri, line, character, includeDeclaration)
 	}
 	return nil, errors.New("not implemented")
 }
@@ -55,10 +55,28 @@ func (m *mockClient) WorkspaceSymbols(ctx context.Context, query string) ([]lsp.
 	return nil, errors.New("not implemented")
 }
 
+func (m *mockClient) GoToImplementation(ctx context.Context, uri string, line, character int) ([]lsp.Location, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockClient) PrepareCallHierarchy(ctx context.Context, uri string, line, character int) ([]lsp.CallHierarchyItem, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockClient) IncomingCalls(ctx context.Context, item lsp.CallHierarchyItem) ([]lsp.CallHierarchyIncomingCall, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockClient) OutgoingCalls(ctx context.Context, item lsp.CallHierarchyItem) ([]lsp.CallHierarchyOutgoingCall, error) {
+	return nil, errors.New("not implemented")
+}
+
 type mockProvider struct {
-	readyFileFn     func(filePath string) (lspClient, string, bool)
-	readyLangsFn    func() []string
-	clientForLangFn func(ctx context.Context, langName string) (lspClient, error)
+	readyFileFn          func(filePath string) (lspClient, string, bool)
+	clientForFileQuickFn func(filePath string) (lspClient, string, error)
+	readyLangsFn         func() []string
+	clientForLangFn      func(ctx context.Context, langName string) (lspClient, error)
+	clientForFileFn      func(ctx context.Context, filePath string) (lspClient, error)
 }
 
 func (m *mockProvider) readyClientForFile(filePath string) (lspClient, string, bool) {
@@ -66,6 +84,18 @@ func (m *mockProvider) readyClientForFile(filePath string) (lspClient, string, b
 		return m.readyFileFn(filePath)
 	}
 	return nil, "mock", false
+}
+
+func (m *mockProvider) clientForFileQuick(filePath string) (lspClient, string, error) {
+	if m.clientForFileQuickFn != nil {
+		return m.clientForFileQuickFn(filePath)
+	}
+	// Default: delegate to readyClientForFile
+	c, name, ready := m.readyClientForFile(filePath)
+	if !ready {
+		return nil, name, fmt.Errorf("language server %q is still starting up", name)
+	}
+	return c, name, nil
 }
 
 func (m *mockProvider) readyLanguages() []string {
@@ -82,6 +112,13 @@ func (m *mockProvider) clientForLanguage(ctx context.Context, langName string) (
 	return nil, errors.New("not implemented")
 }
 
+func (m *mockProvider) clientForFile(ctx context.Context, filePath string) (lspClient, error) {
+	if m.clientForFileFn != nil {
+		return m.clientForFileFn(ctx, filePath)
+	}
+	return nil, errors.New("not implemented")
+}
+
 func toolsetWithProvider(t *testing.T, p lspToolProvider) *Toolset {
 	t.Helper()
 	dir := t.TempDir()
@@ -92,7 +129,6 @@ func toolsetWithProvider(t *testing.T, p lspToolProvider) *Toolset {
 	ts.lspOverride = p
 	return ts
 }
-
 
 func lspTC(name string, in any) core.ToolCall {
 	return tc(name, in)
@@ -114,14 +150,14 @@ func TestLSPTools_WithProvider(t *testing.T) {
 	p := &mockProvider{}
 	ts := toolsetWithProvider(t, p)
 	tools := ts.lspTools()
-	if len(tools) != 5 {
-		t.Fatalf("expected 5 LSP tools, got %d", len(tools))
+	if len(tools) != 9 {
+		t.Fatalf("expected 9 LSP tools, got %d", len(tools))
 	}
 	names := make(map[string]bool)
 	for _, tool := range tools {
 		names[tool.Name()] = true
 	}
-	expected := []string{"lsp_goto_definition", "lsp_find_references", "lsp_hover", "lsp_document_symbol", "lsp_workspace_symbol"}
+	expected := []string{"lsp_goto_definition", "lsp_find_references", "lsp_hover", "lsp_document_symbol", "lsp_workspace_symbol", "lsp_go_to_implementation", "lsp_prepare_call_hierarchy", "lsp_incoming_calls", "lsp_outgoing_calls"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Fatalf("missing tool: %s", name)
@@ -242,7 +278,7 @@ func TestFormatLSPResult_LocationsTruncation(t *testing.T) {
 	locs := make([]lsp.Location, 60)
 	for i := range locs {
 		locs[i] = lsp.Location{
-			URI: fmt.Sprintf("file:///D:/src/file%d.go", i),
+			URI:   fmt.Sprintf("file:///D:/src/file%d.go", i),
 			Range: lsp.Range{Start: lsp.Position{Line: i, Character: 0}},
 		}
 	}
@@ -470,7 +506,7 @@ func TestLSPGoToDefinition_LSPCallFails(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -495,7 +531,7 @@ func TestLSPGoToDefinition_Success(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -521,7 +557,7 @@ func TestRunLSPPositionOp_ZeroResults(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -538,7 +574,7 @@ func TestRunLSPPositionOp_ZeroResults(t *testing.T) {
 
 func TestLSPFindReferences_Success(t *testing.T) {
 	mc := &mockClient{
-		findRefsFn: func(ctx context.Context, uri string, line, character int) ([]lsp.Location, error) {
+		findRefsFn: func(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]lsp.Location, error) {
 			return []lsp.Location{
 				{URI: "file:///D:/src/main.go", Range: lsp.Range{Start: lsp.Position{Line: 5, Character: 2}}},
 				{URI: "file:///D:/src/util.go", Range: lsp.Range{Start: lsp.Position{Line: 12, Character: 0}}},
@@ -547,7 +583,7 @@ func TestLSPFindReferences_Success(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -598,7 +634,7 @@ func TestLSPHover_Success(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -648,7 +684,7 @@ func TestLSPDocumentSymbol_Success(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -712,7 +748,7 @@ func TestLSPDocumentSymbol_LSPCallFails(t *testing.T) {
 	}
 	p := &mockProvider{
 		readyFileFn: func(filePath string) (lspClient, string, bool) {
-			return mc, "gopls", true
+			return mc, "mock", true
 		},
 	}
 	ts := toolsetWithProvider(t, p)
@@ -885,7 +921,7 @@ func TestLSPWorkspaceSymbol_Truncation(t *testing.T) {
 				syms[i] = lsp.SymbolInformation{
 					Name: fmt.Sprintf("Sym%d", i), Kind: lsp.SymbolKindVariable,
 					Location: lsp.Location{
-						URI: fmt.Sprintf("file:///D:/src/file%d.go", i),
+						URI:   fmt.Sprintf("file:///D:/src/file%d.go", i),
 						Range: lsp.Range{Start: lsp.Position{Line: i}},
 					},
 				}

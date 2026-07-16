@@ -23,16 +23,16 @@ type SymbolOutlineProvider interface {
 }
 
 type Toolset struct {
-	root              string
-	worktreeRoot      string
-	originalWorkspace string
-	httpClient        *http.Client
-	webFetchClient    *webfetch.Client
-	ddgSearchURL      string
-	bingSearchURL      string
-	tasks             *shellTaskRegistry
-	fileLocks         *fileMutationLocks
-	fileStates        *fileStateCache
+	root                string
+	worktreeRoot        string
+	originalWorkspace   string
+	httpClient          *http.Client
+	webFetchClient      *webfetch.Client
+	ddgSearchURL        string
+	bingSearchURL       string
+	tasks               *shellTaskRegistry
+	fileLocks           *fileMutationLocks
+	fileStates          *fileStateCache
 	afterFileRead       func(string)
 	beforeFileCommit    func(string)
 	skillDisabled       []string
@@ -44,9 +44,9 @@ type Toolset struct {
 	symbolOutline       SymbolOutlineProvider
 	lspManager          *lsp.Manager
 	lspOverride         lspToolProvider
-	deferredCatalog  DeferredToolCatalog
-	deferredPromote  DeferredToolPromoter
-	deferredRenderer DeferredToolRenderer
+	deferredCatalog     DeferredToolCatalog
+	deferredPromote     DeferredToolPromoter
+	deferredRenderer    DeferredToolRenderer
 }
 
 type externalReadRootsKey struct{}

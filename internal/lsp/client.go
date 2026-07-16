@@ -4,19 +4,18 @@ package lsp
 // connection. Each Client corresponds to one language (e.g. "go", "python").
 //
 // Lifecycle:
-//   1. Created by Manager.clientForServer / backgroundStart
-//   2. Start() launches the server process and completes the LSP initialize
-//      handshake (initialize → initialized notification)
-//   3. ready is set to true after the handshake succeeds
-//   4. On each tool operation, ensureDocumentOpen sends textDocument/didOpen
-//      so the server parses the file (idempotent — skipped if already open)
-//   5. Close() sends shutdown → exit, then kills the process after a timeout
+//  1. Created by Manager.clientForServer / backgroundStart
+//  2. Start() launches the server process and completes the LSP initialize
+//     handshake (initialize → initialized notification)
+//  3. ready is set to true after the handshake succeeds
+//  4. On each tool operation, ensureDocumentOpen sends textDocument/didOpen
+//     so the server parses the file (idempotent — skipped if already open)
+//  5. Close() sends shutdown → exit, then kills the process after a timeout
 //
 // Thread safety: Client uses a sync.Mutex for connection/process state
 // and an atomic.Bool for the ready flag.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,15 +37,24 @@ type Client struct {
 	args     []string // command-line arguments
 	rootURI  string
 
-	mu       sync.Mutex
-	conn     *rpcConn
-	cmd      *exec.Cmd
-	caps     *ServerCapabilities
-	cancel   context.CancelFunc
-	done     chan struct{}
-	ready    atomic.Bool     // true after initialize handshake completes
-		openDocs  map[string]bool  // URIs that have been didOpen'd
-	stderrBuf *strings.Builder // captured stderr for crash diagnostics
+	env                   map[string]string // process environment overrides
+	initializationOptions any               // passed to initialize request
+	settings              any               // sent via workspace/didChangeConfiguration
+	startupTimeout        time.Duration     // max time for initialize handshake
+	shutdownTimeout       time.Duration     // max time for graceful shutdown
+
+	mu         sync.Mutex
+	conn       *rpcConn
+	cmd        *exec.Cmd
+	caps       *ServerCapabilities
+	cancel     context.CancelFunc
+	done       chan struct{}
+	ready      atomic.Bool      // true after initialize handshake completes
+	starting   atomic.Bool      // true while a Start() call is in progress
+	exited     atomic.Bool      // true after cmd.Wait() returns
+	stderrDone chan struct{}    // closed when stderr reader goroutine finishes
+	openDocs   map[string]bool  // URIs that have been didOpen'd
+	stderrBuf  *strings.Builder // captured stderr for crash diagnostics
 }
 
 // Start launches the language server process and performs the LSP handshake.
@@ -54,42 +62,62 @@ type Client struct {
 // initialize handshake happens outside the lock.
 func (c *Client) Start(ctx context.Context) error {
 	c.mu.Lock()
-	if c.conn != nil {
+	if c.conn != nil && c.ready.Load() {
 		c.mu.Unlock()
 		return nil // already started and ready
 	}
+	// Prevent concurrent Start() calls from racing to create the process.
+	if !c.starting.CompareAndSwap(false, true) {
+		c.mu.Unlock()
+		// Another goroutine is already starting. Wait for it.
+		for {
+			if c.ready.Load() {
+				return nil
+			}
+			if !c.starting.Load() {
+				return fmt.Errorf("language server start failed")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if c.openDocs == nil {
+		c.openDocs = make(map[string]bool)
+	}
+	c.mu.Unlock()
+	defer c.starting.Store(false)
 
 	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, c.command, c.args...)
 	shell.ConfigureCommand(cmd)
+	if len(c.env) > 0 {
+		cmd.Env = mergeEnv(os.Environ(), c.env)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
-		c.mu.Unlock()
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		c.mu.Unlock()
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
-		c.mu.Unlock()
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		c.mu.Unlock()
 		return fmt.Errorf("start %s: %w", c.language, err)
 	}
 
 	stderrBuf := new(strings.Builder)
+	stderrDone := make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		data, _ := io.ReadAll(stderr)
 		if len(data) > 0 {
 			stderrBuf.Write(data)
@@ -103,37 +131,43 @@ func (c *Client) Start(ctx context.Context) error {
 		conn.readLoop()
 	}()
 
-	// Store fields so alive() sees them, then release lock for slow init
+	// Store fields so alive() sees them
+	c.mu.Lock()
 	c.conn = conn
 	c.cmd = cmd
 	c.cancel = cancel
 	c.stderrBuf = stderrBuf
+	c.stderrDone = stderrDone
 	c.done = done
 	c.mu.Unlock()
 
 	// Wait for process in background to release OS resources
 	go func() {
 		_ = cmd.Wait()
+		c.exited.Store(true)
 	}()
 
 	// Slow: initialize handshake (gopls may take seconds)
 	var initResult InitializeResult
 	err = conn.sendRequest(cctx, "initialize", InitializeParams{
-		ProcessID: os.Getpid(),
-		RootURI:   c.rootURI,
+		ProcessID:             os.Getpid(),
+		RootURI:               c.rootURI,
+		InitializationOptions: c.initializationOptions,
 		Capabilities: ClientCapabilities{
 			TextDocument: &TextDocumentClientCapabilities{
-				Hover:            &struct{ ContentFormat []string }{ContentFormat: []string{"markdown", "plaintext"}},
-				Definition:       &struct{ LinkSupport bool }{},
-				References:       &struct{}{},
-				Implementation:   &struct{ LinkSupport bool }{},
+				Hover:          &struct{ ContentFormat []string }{ContentFormat: []string{"markdown", "plaintext"}},
+				Definition:     &struct{ LinkSupport bool }{},
+				References:     &struct{}{},
+				Implementation: &struct{ LinkSupport bool }{},
 				DocumentSymbol: &struct {
 					HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport"`
 				}{HierarchicalDocumentSymbolSupport: true},
 				CallHierarchy: &struct{}{},
 			},
 			Workspace: &WorkspaceClientCapabilities{
-				Symbol: &struct{ SymbolKind struct{ ValueSet []int } `json:"symbolKind"` }{
+				Symbol: &struct {
+					SymbolKind struct{ ValueSet []int } `json:"symbolKind"`
+				}{
 					SymbolKind: struct{ ValueSet []int }{
 						ValueSet: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19},
 					},
@@ -144,6 +178,13 @@ func (c *Client) Start(ctx context.Context) error {
 	if err != nil {
 		cancel()
 		cmd.Process.Kill()
+		<-stderrDone
+		c.mu.Lock()
+		c.conn = nil
+		c.mu.Unlock()
+		if stderrBuf.Len() > 0 {
+			return fmt.Errorf("initialize: %w (stderr: %s)", err, stderrBuf.String())
+		}
 		return fmt.Errorf("initialize: %w", err)
 	}
 
@@ -151,7 +192,21 @@ func (c *Client) Start(ctx context.Context) error {
 	if err := conn.sendNotification("initialized", struct{}{}); err != nil {
 		cancel()
 		cmd.Process.Kill()
+		<-stderrDone
+		c.mu.Lock()
+		c.conn = nil
+		c.mu.Unlock()
+		if stderrBuf.Len() > 0 {
+			return fmt.Errorf("initialized: %w (stderr: %s)", err, stderrBuf.String())
+		}
 		return fmt.Errorf("initialized: %w", err)
+	}
+
+	// Send workspace/didChangeConfiguration with settings, if any
+	if c.settings != nil {
+		_ = conn.sendNotification("workspace/didChangeConfiguration", map[string]any{
+			"settings": c.settings,
+		})
 	}
 
 	c.mu.Lock()
@@ -174,11 +229,19 @@ func (c *Client) alive() bool {
 		return false
 	default:
 	}
-	// Check if process has exited
-	if c.cmd.ProcessState != nil && c.cmd.ProcessState.Exited() {
+	// Check if process has exited (atomic set by cmd.Wait goroutine)
+	if c.exited.Load() {
 		return false
 	}
 	return true
+}
+
+// isStarting reports whether the server process has been launched but the
+// initialize handshake has not yet completed, or a Start() call is in flight.
+func (c *Client) isStarting() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.starting.Load() || (c.conn != nil && !c.ready.Load())
 }
 
 // Close gracefully shuts down the language server.
@@ -191,7 +254,11 @@ func (c *Client) Close() error {
 	}
 
 	// Best-effort graceful shutdown: send shutdown + exit with timeout
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	timeout := c.shutdownTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), timeout)
 	defer shutdownCancel()
 	_ = c.conn.sendRequest(shutdownCtx, "shutdown", nil, nil)
 	_ = c.conn.sendNotification("exit", nil)
@@ -213,18 +280,27 @@ func (c *Client) Close() error {
 	c.conn = nil
 	c.cmd = nil
 	c.caps = nil
-	c.openDocs = nil
+	c.ready.Store(false)
+	c.exited.Store(false)
 	return nil
+}
+
+// snapshotConn returns the current rpcConn under lock, or nil if closed.
+func (c *Client) snapshotConn() *rpcConn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn
 }
 
 // --- LSP Operation Methods ---
 
 func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
+	conn := c.snapshotConn()
+	if conn == nil {
 		return fmt.Errorf("language server not connected")
 	}
+
+	c.mu.Lock()
 	opened := c.openDocs[uri]
 	c.mu.Unlock()
 	if opened {
@@ -240,7 +316,7 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 	// Determine language ID from extension
 	langID := languageIDFromPath(path)
 
-	err = c.conn.sendNotification("textDocument/didOpen", struct {
+	err = conn.sendNotification("textDocument/didOpen", struct {
 		TextDocument TextDocumentItem `json:"textDocument"`
 	}{
 		TextDocument: TextDocumentItem{
@@ -265,8 +341,12 @@ func (c *Client) GoToDefinition(ctx context.Context, uri string, line, character
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []Location
-	err := c.conn.sendRequest(ctx,"textDocument/definition", TextDocumentPositionParams{
+	err := conn.sendRequest(ctx, "textDocument/definition", TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 		Position:     Position{Line: line, Character: character},
 	}, &result)
@@ -274,17 +354,21 @@ func (c *Client) GoToDefinition(ctx context.Context, uri string, line, character
 }
 
 // FindReferences returns all references to a symbol.
-func (c *Client) FindReferences(ctx context.Context, uri string, line, character int) ([]Location, error) {
+func (c *Client) FindReferences(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]Location, error) {
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []Location
-	err := c.conn.sendRequest(ctx,"textDocument/references", ReferenceParams{
+	err := conn.sendRequest(ctx, "textDocument/references", ReferenceParams{
 		TextDocumentPositionParams: TextDocumentPositionParams{
 			TextDocument: TextDocumentIdentifier{URI: uri},
 			Position:     Position{Line: line, Character: character},
 		},
-		Context: ReferenceContext{IncludeDeclaration: true},
+		Context: ReferenceContext{IncludeDeclaration: includeDeclaration},
 	}, &result)
 	return result, err
 }
@@ -294,8 +378,12 @@ func (c *Client) Hover(ctx context.Context, uri string, line, character int) (*H
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result HoverResult
-	err := c.conn.sendRequest(ctx,"textDocument/hover", TextDocumentPositionParams{
+	err := conn.sendRequest(ctx, "textDocument/hover", TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 		Position:     Position{Line: line, Character: character},
 	}, &result)
@@ -310,29 +398,40 @@ func (c *Client) DocumentSymbols(ctx context.Context, uri string) ([]DocumentSym
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	// Use json.RawMessage to determine format with a single RPC
 	var raw json.RawMessage
-	err := c.conn.sendRequest(ctx, "textDocument/documentSymbol", struct {
+	err := conn.sendRequest(ctx, "textDocument/documentSymbol", struct {
 		TextDocument TextDocumentIdentifier `json:"textDocument"`
 	}{TextDocument: TextDocumentIdentifier{URI: uri}}, &raw)
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > 0 && raw[0] == '[' && bytes.Contains(raw, []byte(`"location"`)) {
-		var siResult []SymbolInformation
-		if err := json.Unmarshal(raw, &siResult); err != nil {
-			return nil, err
+	// Detect format by checking for "location" key in first array element.
+	// SymbolInformation has a "location" field; DocumentSymbol does not.
+	if len(raw) > 0 && raw[0] == '[' {
+		var firstElements []struct {
+			Location json.RawMessage `json:"location"`
 		}
-		dsResult := make([]DocumentSymbol, 0, len(siResult))
-		for _, si := range siResult {
-			dsResult = append(dsResult, DocumentSymbol{
-				Name:           si.Name,
-				Kind:           si.Kind,
-				Range:          si.Location.Range,
-				SelectionRange: si.Location.Range,
-			})
+		if json.Unmarshal(raw, &firstElements) == nil && len(firstElements) > 0 && firstElements[0].Location != nil {
+			var siResult []SymbolInformation
+			if err := json.Unmarshal(raw, &siResult); err != nil {
+				return nil, err
+			}
+			dsResult := make([]DocumentSymbol, 0, len(siResult))
+			for _, si := range siResult {
+				dsResult = append(dsResult, DocumentSymbol{
+					Name:           si.Name,
+					Kind:           si.Kind,
+					Range:          si.Location.Range,
+					SelectionRange: si.Location.Range,
+				})
+			}
+			return dsResult, nil
 		}
-		return dsResult, nil
 	}
 	var dsResult []DocumentSymbol
 	if err := json.Unmarshal(raw, &dsResult); err != nil {
@@ -343,8 +442,12 @@ func (c *Client) DocumentSymbols(ctx context.Context, uri string) ([]DocumentSym
 
 // WorkspaceSymbols searches for symbols across the entire workspace.
 func (c *Client) WorkspaceSymbols(ctx context.Context, query string) ([]SymbolInformation, error) {
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []SymbolInformation
-	err := c.conn.sendRequest(ctx,"workspace/symbol", WorkspaceSymbolParams{Query: query}, &result)
+	err := conn.sendRequest(ctx, "workspace/symbol", WorkspaceSymbolParams{Query: query}, &result)
 	return result, err
 }
 
@@ -353,8 +456,12 @@ func (c *Client) GoToImplementation(ctx context.Context, uri string, line, chara
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []Location
-	err := c.conn.sendRequest(ctx,"textDocument/implementation", TextDocumentPositionParams{
+	err := conn.sendRequest(ctx, "textDocument/implementation", TextDocumentPositionParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 		Position:     Position{Line: line, Character: character},
 	}, &result)
@@ -366,8 +473,12 @@ func (c *Client) PrepareCallHierarchy(ctx context.Context, uri string, line, cha
 	if err := c.ensureDocumentOpen(ctx, uri); err != nil {
 		return nil, err
 	}
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []CallHierarchyItem
-	err := c.conn.sendRequest(ctx,"textDocument/prepareCallHierarchy", CallHierarchyPrepareParams{
+	err := conn.sendRequest(ctx, "textDocument/prepareCallHierarchy", CallHierarchyPrepareParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 		Position:     Position{Line: line, Character: character},
 	}, &result)
@@ -376,8 +487,12 @@ func (c *Client) PrepareCallHierarchy(ctx context.Context, uri string, line, cha
 
 // IncomingCalls returns functions that call the given item.
 func (c *Client) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyIncomingCall, error) {
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []CallHierarchyIncomingCall
-	err := c.conn.sendRequest(ctx,"callHierarchy/incomingCalls", struct {
+	err := conn.sendRequest(ctx, "callHierarchy/incomingCalls", struct {
 		Item CallHierarchyItem `json:"item"`
 	}{Item: item}, &result)
 	return result, err
@@ -385,11 +500,34 @@ func (c *Client) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]C
 
 // OutgoingCalls returns functions called by the given item.
 func (c *Client) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyOutgoingCall, error) {
+	conn := c.snapshotConn()
+	if conn == nil {
+		return nil, fmt.Errorf("language server not connected")
+	}
 	var result []CallHierarchyOutgoingCall
-	err := c.conn.sendRequest(ctx,"callHierarchy/outgoingCalls", struct {
+	err := conn.sendRequest(ctx, "callHierarchy/outgoingCalls", struct {
 		Item CallHierarchyItem `json:"item"`
 	}{Item: item}, &result)
 	return result, err
+}
+
+// mergeEnv creates a combined environment from base plus overrides.
+// Keys in overrides replace those in base.
+func mergeEnv(base []string, overrides map[string]string) []string {
+	envMap := make(map[string]string, len(base))
+	for _, kv := range base {
+		if idx := strings.Index(kv, "="); idx >= 0 {
+			envMap[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	for k, v := range overrides {
+		envMap[k] = v
+	}
+	result := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		result = append(result, k+"="+v)
+	}
+	return result
 }
 
 // languageIDFromPath returns a LSP language ID for a file path.

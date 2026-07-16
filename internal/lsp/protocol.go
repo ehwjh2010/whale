@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -90,31 +91,31 @@ type CallHierarchyPrepareParams struct {
 
 // SymbolKind constants for LSP symbol kinds.
 const (
-	SymbolKindFile      = 1
-	SymbolKindModule    = 2
-	SymbolKindNamespace = 3
-	SymbolKindPackage   = 4
-	SymbolKindClass     = 5
-	SymbolKindMethod    = 6
-	SymbolKindProperty  = 7
-	SymbolKindField     = 8
-	SymbolKindConstructor = 9
-	SymbolKindEnum      = 10
-	SymbolKindInterface = 11
-	SymbolKindFunction  = 12
-	SymbolKindVariable  = 13
-	SymbolKindConstant  = 14
-	SymbolKindString    = 15
-	SymbolKindNumber    = 16
-	SymbolKindBoolean   = 17
-	SymbolKindArray        = 18
-	SymbolKindObject       = 19
-	SymbolKindKey          = 20
-	SymbolKindNull         = 21
-	SymbolKindEnumMember   = 22
-	SymbolKindStruct       = 23
-	SymbolKindEvent        = 24
-	SymbolKindOperator     = 25
+	SymbolKindFile          = 1
+	SymbolKindModule        = 2
+	SymbolKindNamespace     = 3
+	SymbolKindPackage       = 4
+	SymbolKindClass         = 5
+	SymbolKindMethod        = 6
+	SymbolKindProperty      = 7
+	SymbolKindField         = 8
+	SymbolKindConstructor   = 9
+	SymbolKindEnum          = 10
+	SymbolKindInterface     = 11
+	SymbolKindFunction      = 12
+	SymbolKindVariable      = 13
+	SymbolKindConstant      = 14
+	SymbolKindString        = 15
+	SymbolKindNumber        = 16
+	SymbolKindBoolean       = 17
+	SymbolKindArray         = 18
+	SymbolKindObject        = 19
+	SymbolKindKey           = 20
+	SymbolKindNull          = 21
+	SymbolKindEnumMember    = 22
+	SymbolKindStruct        = 23
+	SymbolKindEvent         = 24
+	SymbolKindOperator      = 25
 	SymbolKindTypeParameter = 26
 )
 
@@ -182,10 +183,60 @@ type HoverResult struct {
 	Range    *Range        `json:"range,omitempty"`
 }
 
-// HoverContents can be a string or MarkupContent.
+// HoverContents represents the contents of a hover response.
+// It supports three LSP 3.17 formats: MarkupContent, plain string,
+// and MarkedString array.
 type HoverContents struct {
-	Kind  string `json:"kind"`  // "markdown" or "plaintext"
+	Kind  string `json:"kind"` // "markdown" or "plaintext"
 	Value string `json:"value"`
+}
+
+// markedString is a single marked string element (language + value).
+type markedString struct {
+	Language string `json:"language"`
+	Value    string `json:"value"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler for the three LSP hover formats.
+func (h *HoverContents) UnmarshalJSON(data []byte) error {
+	// 1. MarkupContent: {"kind": "markdown", "value": "..."}
+	type plain HoverContents
+	var mc plain
+	if err := json.Unmarshal(data, &mc); err == nil && mc.Kind != "" {
+		h.Kind = mc.Kind
+		h.Value = mc.Value
+		return nil
+	}
+
+	// 2. Plain string: "some text"
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		h.Kind = "plaintext"
+		h.Value = s
+		return nil
+	}
+
+	// 3. MarkedString array: [{"language": "go", "value": "..."}, "plain"]
+	var arr []json.RawMessage
+	if err := json.Unmarshal(data, &arr); err == nil {
+		var parts []string
+		for _, raw := range arr {
+			var ms markedString
+			if err := json.Unmarshal(raw, &ms); err == nil && ms.Language != "" {
+				parts = append(parts, "```"+ms.Language+"\n"+ms.Value+"\n```")
+				continue
+			}
+			var ss string
+			if err := json.Unmarshal(raw, &ss); err == nil {
+				parts = append(parts, ss)
+			}
+		}
+		h.Kind = "markdown"
+		h.Value = strings.Join(parts, "\n")
+		return nil
+	}
+
+	return fmt.Errorf("hover contents: unsupported format")
 }
 
 // --- Initialize ---
@@ -195,6 +246,7 @@ type InitializeParams struct {
 	ProcessID             int                `json:"processId"`
 	RootURI               string             `json:"rootUri"`
 	Capabilities          ClientCapabilities `json:"capabilities"`
+	InitializationOptions any                `json:"initializationOptions,omitempty"`
 	WorkspaceFolders      []WorkspaceFolder  `json:"workspaceFolders,omitempty"`
 }
 
@@ -212,11 +264,11 @@ type ClientCapabilities struct {
 
 // TextDocumentClientCapabilities for document operations.
 type TextDocumentClientCapabilities struct {
-	Hover            *struct{ ContentFormat []string } `json:"hover,omitempty"`
-	Definition       *struct{ LinkSupport bool }        `json:"definition,omitempty"`
-	References       *struct{}                          `json:"references,omitempty"`
-	Implementation   *struct{ LinkSupport bool }        `json:"implementation,omitempty"`
-	DocumentSymbol   *struct {
+	Hover          *struct{ ContentFormat []string } `json:"hover,omitempty"`
+	Definition     *struct{ LinkSupport bool }       `json:"definition,omitempty"`
+	References     *struct{}                         `json:"references,omitempty"`
+	Implementation *struct{ LinkSupport bool }       `json:"implementation,omitempty"`
+	DocumentSymbol *struct {
 		HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport"`
 	} `json:"documentSymbol,omitempty"`
 	CallHierarchy *struct{} `json:"callHierarchy,omitempty"`
@@ -231,14 +283,14 @@ type WorkspaceClientCapabilities struct {
 
 // ServerCapabilities declares what the server supports.
 type ServerCapabilities struct {
-	TextDocumentSync         interface{} `json:"textDocumentSync,omitempty"`
-	HoverProvider            interface{} `json:"hoverProvider,omitempty"`
-	DefinitionProvider       interface{} `json:"definitionProvider,omitempty"`
-	ReferencesProvider       interface{} `json:"referencesProvider,omitempty"`
-	ImplementationProvider   interface{} `json:"implementationProvider,omitempty"`
-	DocumentSymbolProvider   interface{} `json:"documentSymbolProvider,omitempty"`
-	WorkspaceSymbolProvider  interface{} `json:"workspaceSymbolProvider,omitempty"`
-	CallHierarchyProvider    interface{} `json:"callHierarchyProvider,omitempty"`
+	TextDocumentSync        interface{} `json:"textDocumentSync,omitempty"`
+	HoverProvider           interface{} `json:"hoverProvider,omitempty"`
+	DefinitionProvider      interface{} `json:"definitionProvider,omitempty"`
+	ReferencesProvider      interface{} `json:"referencesProvider,omitempty"`
+	ImplementationProvider  interface{} `json:"implementationProvider,omitempty"`
+	DocumentSymbolProvider  interface{} `json:"documentSymbolProvider,omitempty"`
+	WorkspaceSymbolProvider interface{} `json:"workspaceSymbolProvider,omitempty"`
+	CallHierarchyProvider   interface{} `json:"callHierarchyProvider,omitempty"`
 }
 
 // InitializeResult is the server's response to initialize.

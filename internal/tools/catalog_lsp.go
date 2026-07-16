@@ -1,16 +1,20 @@
 package tools
 
 // LSP (Language Server Protocol) tools provide code intelligence via
-// language servers. Five tools are registered when an LSP manager is
+// language servers. Nine tools are registered when an LSP manager is
 // available:
 //
-//  lsp_goto_definition   — jump to the definition of a symbol
-//  lsp_find_references   — find all usages of a symbol across the workspace
-//  lsp_hover             — get type info and documentation at a position
-//  lsp_document_symbol   — list all symbols in a file (functions, types, vars)
-//  lsp_workspace_symbol  — search for a symbol by name across all files
+//  lsp_goto_definition        — jump to the definition of a symbol
+//  lsp_find_references        — find all usages of a symbol across the workspace
+//  lsp_hover                  — get type info and documentation at a position
+//  lsp_document_symbol        — list all symbols in a file (functions, types, vars)
+//  lsp_workspace_symbol       — search for a symbol by name across all files
+//  lsp_go_to_implementation   — find implementations of an interface/method
+//  lsp_prepare_call_hierarchy — prepare call hierarchy at a position
+//  lsp_incoming_calls         — find all callers of a function
+//  lsp_outgoing_calls         — find all functions called by a function
 //
-// All five tools require the "lsp.read" capability and are read-only.
+// All nine tools require the "lsp.read" capability and are read-only.
 //
 // # Error handling
 //
@@ -47,17 +51,23 @@ import (
 // lspClient abstracts the subset of *lsp.Client used by tool handlers.
 type lspClient interface {
 	GoToDefinition(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
-	FindReferences(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
+	FindReferences(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]lsp.Location, error)
 	Hover(ctx context.Context, uri string, line, character int) (*lsp.HoverResult, error)
 	DocumentSymbols(ctx context.Context, uri string) ([]lsp.DocumentSymbol, error)
 	WorkspaceSymbols(ctx context.Context, query string) ([]lsp.SymbolInformation, error)
+	GoToImplementation(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
+	PrepareCallHierarchy(ctx context.Context, uri string, line, character int) ([]lsp.CallHierarchyItem, error)
+	IncomingCalls(ctx context.Context, item lsp.CallHierarchyItem) ([]lsp.CallHierarchyIncomingCall, error)
+	OutgoingCalls(ctx context.Context, item lsp.CallHierarchyItem) ([]lsp.CallHierarchyOutgoingCall, error)
 }
 
 // lspToolProvider abstracts the subset of *lsp.Manager used by tool handlers.
 type lspToolProvider interface {
 	readyClientForFile(filePath string) (lspClient, string, bool)
+	clientForFileQuick(filePath string) (lspClient, string, error)
 	readyLanguages() []string
 	clientForLanguage(ctx context.Context, langName string) (lspClient, error)
+	clientForFile(ctx context.Context, filePath string) (lspClient, error)
 }
 
 // managerProvider adapts *lsp.Manager to lspToolProvider for tool handlers.
@@ -81,6 +91,14 @@ func (p *managerProvider) clientForLanguage(ctx context.Context, langName string
 	return p.m.ClientForLanguage(ctx, langName)
 }
 
+func (p *managerProvider) clientForFileQuick(filePath string) (lspClient, string, error) {
+	return p.m.ClientForFileQuick(filePath)
+}
+
+func (p *managerProvider) clientForFile(ctx context.Context, filePath string) (lspClient, error) {
+	return p.m.ClientForFile(ctx, filePath)
+}
+
 func (b *Toolset) lspProvider() lspToolProvider {
 	if b.lspOverride != nil {
 		return b.lspOverride
@@ -97,26 +115,26 @@ func (b *Toolset) lspTools() []core.Tool {
 	}
 	return []core.Tool{
 		toolFn{
-			name:        "lsp_goto_definition",
-			description: "Find the definition of a symbol at a position using the Language Server Protocol. Requires file_path (workspace-relative or absolute), line (0-based), and character (0-based). Returns definition locations with file URIs and ranges. If the language server is still indexing, the tool returns an error — retry after a moment or fall back to grep.",
-			parameters:  lspPositionParams("Find the definition of the symbol at the given position."),
-			readOnly:    true,
+			name:         "lsp_goto_definition",
+			description:  "Find the definition of a symbol at a position using the Language Server Protocol. Requires file_path (workspace-relative or absolute), line (0-based), and character (0-based). Returns definition locations with file URIs and ranges. If the language server is still indexing, the tool returns an error — retry after a moment or fall back to grep.",
+			parameters:   lspPositionParams("Find the definition of the symbol at the given position."),
+			readOnly:     true,
 			capabilities: []string{"lsp.read"},
 			fn:           b.lspGoToDefinition,
 		},
 		toolFn{
-			name:        "lsp_find_references",
-			description: "Find all references to a symbol using the Language Server Protocol. Use this to discover where a function, type, variable, or method is used across the codebase. Requires file_path, line (0-based), and character (0-based). If the language server is still indexing, retry after a moment or fall back to grep.",
-			parameters:  lspReferencesParams(),
-			readOnly:    true,
+			name:         "lsp_find_references",
+			description:  "Find all references to a symbol using the Language Server Protocol. Use this to discover where a function, type, variable, or method is used across the codebase. Requires file_path, line (0-based), and character (0-based). If the language server is still indexing, retry after a moment or fall back to grep.",
+			parameters:   lspReferencesParams(),
+			readOnly:     true,
 			capabilities: []string{"lsp.read"},
 			fn:           b.lspFindReferences,
 		},
 		toolFn{
-			name:        "lsp_hover",
-			description: "Get type information and documentation for a symbol at a position using the Language Server Protocol. Requires file_path, line (0-based), and character (0-based). If the language server is still indexing, retry after a moment or fall back to read_file.",
-			parameters:  lspPositionParams("Get type info and documentation for the symbol at the given position."),
-			readOnly:    true,
+			name:         "lsp_hover",
+			description:  "Get type information and documentation for a symbol at a position using the Language Server Protocol. Requires file_path, line (0-based), and character (0-based). If the language server is still indexing, retry after a moment or fall back to read_file.",
+			parameters:   lspPositionParams("Get type info and documentation for the symbol at the given position."),
+			readOnly:     true,
 			capabilities: []string{"lsp.read"},
 			fn:           b.lspHover,
 		},
@@ -131,7 +149,7 @@ func (b *Toolset) lspTools() []core.Tool {
 				},
 				"required": []string{"file_path"},
 			},
-			readOnly:    true,
+			readOnly:     true,
 			capabilities: []string{"lsp.read"},
 			fn:           b.lspDocumentSymbol,
 		},
@@ -146,9 +164,41 @@ func (b *Toolset) lspTools() []core.Tool {
 				},
 				"required": []string{"query"},
 			},
-			readOnly:    true,
+			readOnly:     true,
 			capabilities: []string{"lsp.read"},
 			fn:           b.lspWorkspaceSymbol,
+		},
+		toolFn{
+			name:         "lsp_go_to_implementation",
+			description:  "Find implementations of an interface or abstract method at a position using the Language Server Protocol. Requires file_path, line (0-based), and character (0-based). Returns implementation locations with file URIs and ranges. If the language server is still indexing, retry after a moment or fall back to grep.",
+			parameters:   lspPositionParams("Find implementations of the symbol at the given position."),
+			readOnly:     true,
+			capabilities: []string{"lsp.read"},
+			fn:           b.lspGoToImplementation,
+		},
+		toolFn{
+			name:         "lsp_prepare_call_hierarchy",
+			description:  "Prepare call hierarchy for a function or method at a position using the Language Server Protocol. Returns call hierarchy items that can be used with lsp_incoming_calls or lsp_outgoing_calls. Requires file_path, line (0-based), and character (0-based).",
+			parameters:   lspPositionParams("Prepare call hierarchy at the given position."),
+			readOnly:     true,
+			capabilities: []string{"lsp.read"},
+			fn:           b.lspPrepareCallHierarchy,
+		},
+		toolFn{
+			name:         "lsp_incoming_calls",
+			description:  "Find all functions or methods that call the function at a position using the Language Server Protocol. Internally calls prepareCallHierarchy then incomingCalls. Requires file_path, line (0-based), and character (0-based).",
+			parameters:   lspPositionParams("Find incoming calls for the symbol at the given position."),
+			readOnly:     true,
+			capabilities: []string{"lsp.read"},
+			fn:           b.lspIncomingCalls,
+		},
+		toolFn{
+			name:         "lsp_outgoing_calls",
+			description:  "Find all functions or methods called by the function at a position using the Language Server Protocol. Internally calls prepareCallHierarchy then outgoingCalls. Requires file_path, line (0-based), and character (0-based).",
+			parameters:   lspPositionParams("Find outgoing calls for the symbol at the given position."),
+			readOnly:     true,
+			capabilities: []string{"lsp.read"},
+			fn:           b.lspOutgoingCalls,
 		},
 	}
 }
@@ -199,21 +249,21 @@ func lspFriendlyError(err error) string {
 
 func (b *Toolset) lspGoToDefinition(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "definition",
-		func(client lspClient, uri string, line, character int) (any, error) {
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.GoToDefinition(ctx, uri, line, character)
 		})
 }
 
 func (b *Toolset) lspFindReferences(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "references",
-		func(client lspClient, uri string, line, character int) (any, error) {
-			return client.FindReferences(ctx, uri, line, character)
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+			return client.FindReferences(ctx, uri, line, character, includeDeclaration)
 		})
 }
 
 func (b *Toolset) lspHover(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "hover",
-		func(client lspClient, uri string, line, character int) (any, error) {
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.Hover(ctx, uri, line, character)
 		})
 }
@@ -235,9 +285,9 @@ func (b *Toolset) lspDocumentSymbol(ctx context.Context, call core.ToolCall) (co
 	if p == nil {
 		return marshalToolError(call, "lsp_not_ready", "no language servers configured"), nil
 	}
-	client, serverName, ready := p.readyClientForFile(abs)
-	if !ready {
-		return marshalToolError(call, "lsp_not_ready", fmt.Sprintf("language server %q is still starting up; wait a few seconds and retry, or use grep + read_file in the meantime", serverName)), nil
+	client, _, err := p.clientForFileQuick(abs)
+	if err != nil {
+		return marshalToolError(call, "lsp_not_ready", err.Error()), nil
 	}
 
 	lspCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -272,6 +322,64 @@ func writeDocumentSymbols(md *strings.Builder, symbols []lsp.DocumentSymbol, dep
 		writeDocumentSymbols(md, s.Children, depth+1)
 	}
 }
+
+// --- Go-to-implementation ---
+
+func (b *Toolset) lspGoToImplementation(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
+	return b.runLSPPositionOp(ctx, call, "implementation",
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+			return client.GoToImplementation(ctx, uri, line, character)
+		})
+}
+
+// --- Call hierarchy ---
+
+func (b *Toolset) lspPrepareCallHierarchy(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
+	return b.runLSPPositionOp(ctx, call, "call hierarchy",
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+			return client.PrepareCallHierarchy(ctx, uri, line, character)
+		})
+}
+
+func (b *Toolset) lspIncomingCalls(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
+	return b.runLSPPositionOp(ctx, call, "incoming calls",
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+			items, err := client.PrepareCallHierarchy(ctx, uri, line, character)
+			if err != nil {
+				return nil, err
+			}
+			var all []lsp.CallHierarchyIncomingCall
+			for _, item := range items {
+				calls, err := client.IncomingCalls(ctx, item)
+				if err != nil {
+					return nil, err
+				}
+				all = append(all, calls...)
+			}
+			return all, nil
+		})
+}
+
+func (b *Toolset) lspOutgoingCalls(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
+	return b.runLSPPositionOp(ctx, call, "outgoing calls",
+		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+			items, err := client.PrepareCallHierarchy(ctx, uri, line, character)
+			if err != nil {
+				return nil, err
+			}
+			var all []lsp.CallHierarchyOutgoingCall
+			for _, item := range items {
+				calls, err := client.OutgoingCalls(ctx, item)
+				if err != nil {
+					return nil, err
+				}
+				all = append(all, calls...)
+			}
+			return all, nil
+		})
+}
+
+// --- Workspace symbol ---
 
 func (b *Toolset) lspWorkspaceSymbol(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	var in struct {
@@ -337,12 +445,13 @@ func (b *Toolset) lspWorkspaceSymbol(ctx context.Context, call core.ToolCall) (c
 
 func (b *Toolset) runLSPPositionOp(
 	ctx context.Context, call core.ToolCall, opName string,
-	op func(client lspClient, uri string, line, character int) (any, error),
+	op func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error),
 ) (core.ToolResult, error) {
 	var in struct {
-		FilePath  string `json:"file_path"`
-		Line      int    `json:"line"`
-		Character int    `json:"character"`
+		FilePath           string `json:"file_path"`
+		Line               int    `json:"line"`
+		Character          int    `json:"character"`
+		IncludeDeclaration *bool  `json:"include_declaration"`
 	}
 	if err := decodeInput(call.Input, &in); err != nil {
 		return marshalToolError(call, "invalid_args", err.Error()), nil
@@ -364,13 +473,17 @@ func (b *Toolset) runLSPPositionOp(
 	if p == nil {
 		return marshalToolError(call, "lsp_not_ready", "no language servers configured"), nil
 	}
-	client, serverName, ready := p.readyClientForFile(abs)
-	if !ready {
-		return marshalToolError(call, "lsp_not_ready", fmt.Sprintf("language server %q is still starting up; wait a few seconds and retry, or use grep + read_file in the meantime", serverName)), nil
+	client, _, err := p.clientForFileQuick(abs)
+	if err != nil {
+		return marshalToolError(call, "lsp_not_ready", err.Error()), nil
 	}
 
+	includeDecl := true // default to true as documented
+	if in.IncludeDeclaration != nil {
+		includeDecl = *in.IncludeDeclaration
+	}
 
-	result, err := op(client, uri, in.Line, in.Character)
+	result, err := op(client, uri, in.Line, in.Character, includeDecl)
 	if err != nil {
 		return marshalToolError(call, "lsp_call_failed", lspFriendlyError(err)), nil
 	}

@@ -27,8 +27,8 @@ type Message struct {
 
 // RPCError is a JSON-RPC 2.0 error.
 type RPCError struct {
-	Code    int            `json:"code"`
-	Message string         `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
@@ -199,6 +199,7 @@ func (c *rpcConn) sendNotification(method string, params any) error {
 
 // readLoop reads incoming messages from the server and routes responses.
 func (c *rpcConn) readLoop() error {
+	defer c.shutdown()
 	for {
 		body, err := c.reader.ReadMessage()
 		if err != nil {

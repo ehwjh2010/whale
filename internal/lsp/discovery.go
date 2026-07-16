@@ -81,7 +81,6 @@ func knownInstallDirs() []string {
 	return dirs
 }
 
-
 func vscodeExtensionsDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
