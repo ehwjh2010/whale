@@ -151,7 +151,9 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Slow: initialize handshake (gopls may take seconds)
 	var initResult InitializeResult
-	err = conn.sendRequest(cctx, "initialize", InitializeParams{
+	handshakeCtx, handshakeCancel := context.WithTimeout(cctx, c.startupTimeout)
+	defer handshakeCancel()
+	err = conn.sendRequest(handshakeCtx, "initialize", InitializeParams{
 		ProcessID:             os.Getpid(),
 		RootURI:               c.rootURI,
 		InitializationOptions: c.initializationOptions,
