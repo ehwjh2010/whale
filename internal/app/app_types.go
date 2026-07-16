@@ -7,6 +7,7 @@ import (
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/lsp"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
@@ -144,6 +145,7 @@ type App struct {
 	thinkingEnabled       bool
 	contextWindow         int
 	mcpManager            *whalemcp.Manager
+	lspManager            *lsp.Manager
 	mcpSig                string
 	mcpSigFrozen          bool
 	promotedTools         map[string]bool // qualified tool names that have been promoted

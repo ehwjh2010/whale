@@ -272,22 +272,8 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return client, nil
 	}
 
-	m.mu.Lock()
-	if client, ok := m.clients[name]; ok {
-		if client.alive() {
-			m.mu.Unlock()
-			return client, nil
-		}
-		dead := client
-		delete(m.clients, name)
-		m.mu.Unlock()
-		dead.Close()
-		m.mu.Lock()
-	}
-
 	command, args, found := FindServerForConfig(srv)
 	if !found {
-		m.mu.Unlock()
 		help := srv.InstallHelp
 		if help == "" {
 			help = "install " + srv.Command
@@ -296,14 +282,28 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return nil, fmt.Errorf("%s not found. Install it: %s", srv.Command, help)
 	}
 
-	client = m.newClient(name, srv, command, args)
-	m.clients[name] = client
-	created := client
-	m.mu.Unlock()
+	// Build the replacement before acquiring the write lock so that
+	// FindServerForConfig (which does I/O) does not extend the critical section.
+	newClient := m.newClient(name, srv, command, args)
 
-	if err := client.Start(ctx); err != nil {
+	m.mu.Lock()
+	if existing, ok := m.clients[name]; ok {
+		if existing.alive() {
+			m.mu.Unlock()
+			return existing, nil
+		}
+		dead := existing
+		m.clients[name] = newClient
+		m.mu.Unlock()
+		dead.Close()
+	} else {
+		m.clients[name] = newClient
+		m.mu.Unlock()
+	}
+
+	if err := newClient.Start(ctx); err != nil {
 		m.mu.Lock()
-		if m.clients[name] == created {
+		if m.clients[name] == newClient {
 			delete(m.clients, name)
 		}
 		m.mu.Unlock()
@@ -311,8 +311,8 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return nil, fmt.Errorf("start %s: %w", name, err)
 	}
 	m.setStatus(name, "loaded", command, "")
-	m.maybeMonitorRestart(name, srv, client)
-	return client, nil
+	m.maybeMonitorRestart(name, srv, newClient)
+	return newClient, nil
 }
 
 // AvailableLanguages returns languages whose server binary was found on

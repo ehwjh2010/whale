@@ -57,7 +57,6 @@ func (r *Reader) ReadMessage() ([]byte, error) {
 		}
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
-			// Empty line = end of headers, body follows
 			break
 		}
 		if strings.HasPrefix(line, "Content-Length:") {
@@ -67,7 +66,6 @@ func (r *Reader) ReadMessage() ([]byte, error) {
 				return nil, fmt.Errorf("invalid Content-Length %q: %w", v, err)
 			}
 		}
-		// Ignore other headers (Content-Type, etc.)
 	}
 	if contentLength <= 0 {
 		return nil, fmt.Errorf("no Content-Length header in message")
@@ -197,7 +195,8 @@ func (c *rpcConn) sendNotification(method string, params any) error {
 	return c.writer.WriteMessage(reqBytes)
 }
 
-// readLoop reads incoming messages from the server and routes responses.
+// readLoop reads incoming messages from the server, routing responses
+// to pending callers and replying MethodNotFound to server requests.
 func (c *rpcConn) readLoop() error {
 	defer c.shutdown()
 	for {
@@ -207,9 +206,20 @@ func (c *rpcConn) readLoop() error {
 		}
 		var msg Message
 		if err := json.Unmarshal(body, &msg); err != nil {
-			continue // skip malformed messages
+			continue
 		}
 		if msg.ID != nil {
+			if msg.Method != "" {
+				// Server→client request (e.g. workspace/configuration,
+				// client/registerCapability). Reply MethodNotFound since
+				// we do not handle server-initiated requests.
+				_ = c.sendError(*msg.ID, &RPCError{
+					Code:    -32601,
+					Message: "Method not found: " + msg.Method,
+				})
+				continue
+			}
+			// Client→server response — route to pending caller.
 			c.mu.Lock()
 			ch, ok := c.pending[*msg.ID]
 			if ok {
@@ -222,6 +232,20 @@ func (c *rpcConn) readLoop() error {
 		}
 		// Notifications (no ID) are silently ignored.
 	}
+}
+
+// sendError writes a JSON-RPC error response for a server request.
+func (c *rpcConn) sendError(id int64, rpcErr *RPCError) error {
+	resp := Message{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Error:   rpcErr,
+	}
+	respBytes, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return c.writer.WriteMessage(respBytes)
 }
 
 // shutdown drains pending channels and sends nil to unblock callers.

@@ -534,7 +534,6 @@ func TestClient_isStarting_ConnReady(t *testing.T) {
 	c := &Client{
 		language: "go",
 		conn:     &rpcConn{},
-		openDocs: make(map[string]bool),
 	}
 	if !c.isStarting() {
 		t.Fatal("should be starting when conn exists but not ready")

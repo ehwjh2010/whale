@@ -42,12 +42,13 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	mcpManager := whalemcp.NewManager(mcpConfig, workspaceRoot)
 	pluginTools := pluginOutcome.Tools
 	toolset.SetExtraSkills(pluginOutcome.Skills)
+	var lspMgr *lsp.Manager
 	lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
 	lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
 	if err != nil {
 		log.Printf("lsp: failed to load config from %s: %v (LSP disabled)", lspConfigPath, err)
 	} else if len(lspCfg.Servers) > 0 {
-		lspMgr := lsp.NewManager(lspCfg, workspaceRoot)
+		lspMgr = lsp.NewManager(lspCfg, workspaceRoot)
 		toolset.SetLSPManager(lspMgr)
 		lspMgr.Warmup()
 	}
@@ -77,6 +78,7 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	return appToolInit{
 		toolset:              toolset,
 		mcpManager:           mcpManager,
+		lspManager:           lspMgr,
 		pluginManager:        pluginManager,
 		pluginTools:          pluginTools,
 		pluginAgents:         pluginOutcome.Agents,
