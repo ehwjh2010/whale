@@ -68,6 +68,7 @@ type lspToolProvider interface {
 	readyLanguages() []string
 	clientForLanguage(ctx context.Context, langName string) (lspClient, error)
 	clientForFile(ctx context.Context, filePath string) (lspClient, error)
+	ensureAllAsync()
 }
 
 // managerProvider adapts *lsp.Manager to lspToolProvider for tool handlers.
@@ -89,6 +90,10 @@ func (p *managerProvider) readyLanguages() []string {
 
 func (p *managerProvider) clientForLanguage(ctx context.Context, langName string) (lspClient, error) {
 	return p.m.ClientForLanguage(ctx, langName)
+}
+
+func (p *managerProvider) ensureAllAsync() {
+	p.m.EnsureAllAsync()
 }
 
 func (p *managerProvider) clientForFileQuick(filePath string) (lspClient, string, error) {
@@ -398,6 +403,7 @@ func (b *Toolset) lspWorkspaceSymbol(ctx context.Context, call core.ToolCall) (c
 	if p == nil {
 		return marshalToolError(call, "lsp_not_ready", "no language servers configured"), nil
 	}
+	p.ensureAllAsync()
 	for _, name := range p.readyLanguages() {
 		client, err := p.clientForLanguage(ctx, name)
 		if err != nil {

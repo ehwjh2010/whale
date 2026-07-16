@@ -159,6 +159,14 @@ func (m *Manager) ClientForFileQuick(filePath string) (*Client, string, error) {
 	return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
 }
 
+// EnsureAllAsync triggers a background start for every configured language
+// server that is not already running. It returns immediately.
+func (m *Manager) EnsureAllAsync() {
+	for name := range m.config.Servers {
+		m.ensureAsync(name)
+	}
+}
+
 // ensureAsync triggers a background start for the named language server
 // if it is not already running or starting. Safe to call concurrently.
 func (m *Manager) ensureAsync(name string) {

@@ -86,6 +86,8 @@ func (m *mockProvider) readyClientForFile(filePath string) (lspClient, string, b
 	return nil, "mock", false
 }
 
+func (m *mockProvider) ensureAllAsync() {}
+
 func (m *mockProvider) clientForFileQuick(filePath string) (lspClient, string, error) {
 	if m.clientForFileQuickFn != nil {
 		return m.clientForFileQuickFn(filePath)
