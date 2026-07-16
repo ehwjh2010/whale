@@ -49,11 +49,12 @@ type Client struct {
 	caps       *ServerCapabilities
 	cancel     context.CancelFunc
 	done       chan struct{}
-	ready      atomic.Bool      // true after initialize handshake completes
-	starting   atomic.Bool      // true while a Start() call is in progress
-	exited     atomic.Bool      // true after cmd.Wait() returns
-	stderrDone chan struct{}    // closed when stderr reader goroutine finishes
-	stderrBuf  *strings.Builder // captured stderr for crash diagnostics
+	ready      atomic.Bool          // true after initialize handshake completes
+	starting   atomic.Bool          // true while a Start() call is in progress
+	exited     atomic.Bool          // true after cmd.Wait() returns
+	stderrDone chan struct{}        // closed when stderr reader goroutine finishes
+	stderrBuf  *strings.Builder     // captured stderr for crash diagnostics
+	openDocs   map[string]time.Time // URI → last modTime sent via didOpen
 }
 
 // Start launches the language server process and performs the LSP handshake.
@@ -78,6 +79,9 @@ func (c *Client) Start(ctx context.Context) error {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+	}
+	if c.openDocs == nil {
+		c.openDocs = make(map[string]time.Time)
 	}
 	c.mu.Unlock()
 	defer c.starting.Store(false)
@@ -299,6 +303,19 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 	}
 
 	path := URIToPath(uri)
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		return fmt.Errorf("stat file for didOpen: %w", statErr)
+	}
+
+	// Skip if the file hasn't changed since the last didOpen.
+	c.mu.Lock()
+	if prev, ok := c.openDocs[uri]; ok && prev.Equal(info.ModTime()) {
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read file for didOpen: %w", err)
@@ -319,6 +336,10 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("didOpen: %w", err)
 	}
+
+	c.mu.Lock()
+	c.openDocs[uri] = info.ModTime()
+	c.mu.Unlock()
 	return nil
 }
 
