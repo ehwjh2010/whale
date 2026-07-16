@@ -227,7 +227,10 @@ func (c *rpcConn) readLoop() error {
 			}
 			c.mu.Unlock()
 			if ok {
-				ch <- &msg
+				select {
+				case ch <- &msg:
+				default:
+				}
 			}
 		}
 		// Notifications (no ID) are silently ignored.
