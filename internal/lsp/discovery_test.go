@@ -263,3 +263,55 @@ func TestFindServerForConfig_NoArgsPreserved(t *testing.T) {
 		t.Fatalf("expected empty args, got %v", args)
 	}
 }
+
+func TestIsRustupProxy_NonRustBinary(t *testing.T) {
+	if isRustupProxy("gopls") {
+		t.Fatal("should return false for non-rust binary")
+	}
+}
+
+func TestIsRustupProxy_OutsideCargoBin(t *testing.T) {
+	if isRustupProxy("C:\\tools\\rust-analyzer.exe") {
+		t.Fatal("should return false when not in ~/.cargo/bin")
+	}
+}
+
+func TestIsRustupProxy_ValidBinary(t *testing.T) {
+	// real rust-analyzer (after component install) should not be flagged
+	path, _, found := FindServerForConfig(&ServerConfig{
+		Command:             "rust-analyzer",
+		ExtensionToLanguage: map[string]string{".rs": "rust"},
+	})
+	if !found {
+		t.Skip("rust-analyzer not found on this system")
+	}
+	if isRustupProxy(path) {
+		t.Fatalf("working rust-analyzer at %s should not be flagged as proxy", path)
+	}
+}
+
+func TestClangdInstallDir_Empty(t *testing.T) {
+	dir := t.TempDir()
+	got := clangdInstallDir(dir)
+	if got != "" {
+		t.Fatalf("expected empty for empty dir, got %q", got)
+	}
+}
+
+func TestClangdInstallDir_Found(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "clangd", "clangd_19.1.2", "bin"), 0755)
+	got := clangdInstallDir(dir)
+	if got == "" || !strings.HasSuffix(got, "bin") {
+		t.Fatalf("expected bin path, got %q", got)
+	}
+}
+
+func TestClangdInstallDir_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "clangd", "other_dir", "bin"), 0755)
+	got := clangdInstallDir(dir)
+	if got != "" {
+		t.Fatalf("expected empty for non-clangd dir, got %q", got)
+	}
+}
