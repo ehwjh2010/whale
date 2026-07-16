@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -54,7 +53,6 @@ type Client struct {
 	starting   atomic.Bool      // true while a Start() call is in progress
 	exited     atomic.Bool      // true after cmd.Wait() returns
 	stderrDone chan struct{}    // closed when stderr reader goroutine finishes
-	openDocs   map[string]bool  // URIs that have been didOpen'd
 	stderrBuf  *strings.Builder // captured stderr for crash diagnostics
 }
 
@@ -80,9 +78,6 @@ func (c *Client) Start(ctx context.Context) error {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-	}
-	if c.openDocs == nil {
-		c.openDocs = make(map[string]bool)
 	}
 	c.mu.Unlock()
 	defer c.starting.Store(false)
@@ -130,7 +125,7 @@ func (c *Client) Start(ctx context.Context) error {
 	go func() {
 		defer close(done)
 		if err := conn.readLoop(); err != nil {
-			log.Printf("lsp %s: readLoop exited: %v", c.language, err)
+			fmt.Fprintf(os.Stderr, "whale: lsp %s readLoop: %v\n", c.language, err)
 		}
 	}()
 
@@ -305,20 +300,12 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 		return fmt.Errorf("language server not connected")
 	}
 
-	c.mu.Lock()
-	opened := c.openDocs[uri]
-	c.mu.Unlock()
-	if opened {
-		return nil
-	}
-
 	path := URIToPath(uri)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read file for didOpen: %w", err)
 	}
 
-	// Determine language ID from extension
 	langID := languageIDFromPath(path)
 
 	err = conn.sendNotification("textDocument/didOpen", struct {
@@ -334,10 +321,6 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 	if err != nil {
 		return fmt.Errorf("didOpen: %w", err)
 	}
-
-	c.mu.Lock()
-	c.openDocs[uri] = true
-	c.mu.Unlock()
 	return nil
 }
 

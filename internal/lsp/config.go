@@ -78,7 +78,6 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,13 +231,13 @@ func LoadLSPConfig(path string) (*LSPConfig, error) {
 			}
 			delete(cfg.Servers, name)
 			if err := cfg.RegisterServer(name, srv); err != nil {
-				log.Printf("lsp: skipping server %q from user config: %v (keeping default)", name, err)
+				fmt.Fprintf(os.Stderr, "whale: lsp: skipping server %q from user config: %v (keeping default)\n", name, err)
 				cfg.RegisterServer(name, saved)
 				continue
 			}
 		} else {
 			if err := cfg.RegisterServer(name, srv); err != nil {
-				log.Printf("lsp: skipping server %q from user config: %v", name, err)
+				fmt.Fprintf(os.Stderr, "whale: lsp: skipping server %q from user config: %v\n", name, err)
 				continue
 			}
 		}
@@ -255,7 +254,7 @@ func parseUserServers(raw map[string]json.RawMessage) map[string]*ServerConfig {
 		if err := json.Unmarshal(serversRaw, &servers); err == nil {
 			return servers
 		} else {
-			log.Printf("lsp: failed to parse \"servers\" field, falling back to legacy formats: %v", err)
+			fmt.Fprintf(os.Stderr, "whale: lsp: parse servers field failed, trying legacy: %v\n", err)
 		}
 	}
 
@@ -350,7 +349,7 @@ func loadDefaults(cfg *LSPConfig) {
 	}
 	for name, srv := range defaults {
 		if err := cfg.RegisterServer(name, srv); err != nil {
-			log.Printf("lsp: skipping default server %q: %v", name, err)
+			fmt.Fprintf(os.Stderr, "whale: lsp: skipping default server %q: %v\n", name, err)
 		}
 	}
 }

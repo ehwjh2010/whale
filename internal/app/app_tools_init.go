@@ -2,7 +2,7 @@ package app
 
 import (
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
@@ -46,7 +46,7 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
 	lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
 	if err != nil {
-		log.Printf("lsp: failed to load config from %s: %v (LSP disabled)", lspConfigPath, err)
+		fmt.Fprintf(os.Stderr, "whale: lsp: failed to load config from %s: %v (LSP disabled)\n", lspConfigPath, err)
 	} else if len(lspCfg.Servers) > 0 {
 		lspMgr = lsp.NewManager(lspCfg, workspaceRoot)
 		toolset.SetLSPManager(lspMgr)

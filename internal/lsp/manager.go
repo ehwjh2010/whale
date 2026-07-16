@@ -182,7 +182,6 @@ func (m *Manager) newClient(name string, srv *ServerConfig, command string, args
 		command:               command,
 		args:                  args,
 		rootURI:               PathToURI(m.workspaceRoot),
-		openDocs:              make(map[string]bool),
 		env:                   srv.Env,
 		initializationOptions: srv.InitializationOptions,
 		settings:              srv.Settings,

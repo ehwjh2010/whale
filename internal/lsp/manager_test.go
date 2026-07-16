@@ -36,8 +36,8 @@ func TestManager_Close_Empty(t *testing.T) {
 func TestManager_Close_Clients(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	m.clients["a"] = &Client{language: "a", openDocs: make(map[string]bool)}
-	m.clients["b"] = &Client{language: "b", openDocs: make(map[string]bool)}
+	m.clients["a"] = &Client{language: "a"}
+	m.clients["b"] = &Client{language: "b"}
 	m.mu.Unlock()
 	if err := m.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -53,7 +53,7 @@ func TestManager_Close_Clients(t *testing.T) {
 func TestManager_ReadyLanguages(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	c := &Client{language: "go", openDocs: make(map[string]bool)}
+	c := &Client{language: "go"}
 	c.ready.Store(true)
 	m.clients["go"] = c
 	m.mu.Unlock()
@@ -66,9 +66,9 @@ func TestManager_ReadyLanguages(t *testing.T) {
 func TestManager_ReadyLanguages_OnlyReady(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	ra := &Client{language: "a", openDocs: make(map[string]bool)}
+	ra := &Client{language: "a"}
 	ra.ready.Store(true)
-	rb := &Client{language: "b", openDocs: make(map[string]bool)}
+	rb := &Client{language: "b"}
 	m.clients["a"] = ra
 	m.clients["b"] = rb
 	m.mu.Unlock()
@@ -360,7 +360,7 @@ func TestManager_Close_NoPanic(t *testing.T) {
 func TestManager_ClientForFile_CachedClient(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	m.clients["go"] = &Client{language: "go", openDocs: make(map[string]bool)}
+	m.clients["go"] = &Client{language: "go"}
 	m.mu.Unlock()
 	srv, _, _ := m.config.ForExtension(".go")
 	if srv == nil {
@@ -388,7 +388,7 @@ func TestManager_AvailableSummary_Failed(t *testing.T) {
 func TestManager_ensureAsync_AlreadyRunning(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	c := &Client{language: "go", openDocs: make(map[string]bool)}
+	c := &Client{language: "go"}
 	c.ready.Store(true)
 	m.clients["go"] = c
 	m.mu.Unlock()
@@ -409,7 +409,7 @@ func TestManager_AvailableSummary_LoadedStatus(t *testing.T) {
 		"go": {path: "/bin/gopls", found: true},
 	}
 	m.extCache = map[string]bool{".go": true}
-	c := &Client{language: "go", openDocs: make(map[string]bool)}
+	c := &Client{language: "go"}
 	c.ready.Store(true)
 	m.clients["go"] = c
 	m.mu.Unlock()
@@ -433,8 +433,8 @@ func TestManager_AvailableSummary_NotUsed(t *testing.T) {
 func TestManager_Close_ErrorCollection(t *testing.T) {
 	m := NewManager(nil, "/w")
 	m.mu.Lock()
-	m.clients["a"] = &Client{language: "a", openDocs: make(map[string]bool)}
-	m.clients["b"] = &Client{language: "b", openDocs: make(map[string]bool)}
+	m.clients["a"] = &Client{language: "a"}
+	m.clients["b"] = &Client{language: "b"}
 	m.mu.Unlock()
 	_ = m.Close()
 }
@@ -511,7 +511,7 @@ func TestManager_Client_CloseIdempotent(t *testing.T) {
 }
 
 func TestManager_Client_CloseSetsReadyFalse(t *testing.T) {
-	c := &Client{openDocs: make(map[string]bool)}
+	c := &Client{}
 	c.ready.Store(true)
 	c.Close()
 	if c.ready.Load() {

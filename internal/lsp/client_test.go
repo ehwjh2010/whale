@@ -189,7 +189,7 @@ func TestClient_lspMethodsNoConn(t *testing.T) {
 }
 
 func TestEnsureDocumentOpen_NoConn(t *testing.T) {
-	c := &Client{openDocs: make(map[string]bool)}
+	c := &Client{}
 	err := c.ensureDocumentOpen(nil, "file:///test.go")
 	if err == nil || !strings.Contains(err.Error(), "not connected") {
 		t.Fatalf("expected 'not connected' error, got: %v", err)
