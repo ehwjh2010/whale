@@ -143,7 +143,9 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Wait for process in background to release OS resources
 	go func() {
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			fmt.Fprintf(stderrBuf, "process exited: %v\n", err)
+		}
 		c.exited.Store(true)
 	}()
 
