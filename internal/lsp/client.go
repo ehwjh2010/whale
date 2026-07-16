@@ -124,9 +124,7 @@ func (c *Client) Start(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := conn.readLoop(); err != nil {
-			fmt.Fprintf(os.Stderr, "whale: lsp %s readLoop: %v\n", c.language, err)
-		}
+		conn.readLoop()
 	}()
 
 	// Store fields so alive() sees them
