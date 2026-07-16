@@ -70,7 +70,7 @@ func knownInstallDirs() []string {
 				filepath.Join(home, ".cargo", "bin"),
 				filepath.Join(home, "AppData", "Roaming", "npm"),
 				filepath.Join(home, "AppData", "Local", "Programs", "LLVM", "bin"),
-				filepath.Join(home, "clangd", "clangd_19.1.2", "bin"),
+				clangdInstallDir(home),
 				"C:\\Program Files\\LLVM\\bin",
 			)
 		} else {
@@ -244,6 +244,21 @@ func vscodeVolarServer(extDir string) (string, []string, bool) {
 		}
 	}
 	return "", nil, false
+}
+
+// clangdInstallDir finds a versioned clangd installation under ~/clangd/.
+func clangdInstallDir(home string) string {
+	clangdDir := filepath.Join(home, "clangd")
+	entries, err := os.ReadDir(clangdDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "clangd_") {
+			return filepath.Join(clangdDir, e.Name(), "bin")
+		}
+	}
+	return ""
 }
 
 func isWindows() bool {

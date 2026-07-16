@@ -75,7 +75,7 @@ func (c *Client) Start(ctx context.Context) error {
 				return nil
 			}
 			if !c.starting.Load() {
-				return fmt.Errorf("language server start failed")
+				return fmt.Errorf("language server start failed (concurrent attempt completed without becoming ready)")
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -248,6 +248,13 @@ func (c *Client) isStarting() bool {
 
 // Close gracefully shuts down the language server.
 func (c *Client) Close() error {
+	// Wait for any in-progress Start() to finish setting c.conn so
+	// we don't return early and leak the process.
+	deadline := time.Now().Add(5 * time.Second)
+	for c.starting.Load() && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer func() {
