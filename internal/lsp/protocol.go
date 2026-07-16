@@ -152,6 +152,28 @@ func SymbolKindName(kind int) string {
 		return "constant"
 	case SymbolKindString:
 		return "string"
+	case SymbolKindNumber:
+		return "number"
+	case SymbolKindBoolean:
+		return "boolean"
+	case SymbolKindArray:
+		return "array"
+	case SymbolKindObject:
+		return "object"
+	case SymbolKindKey:
+		return "key"
+	case SymbolKindNull:
+		return "null"
+	case SymbolKindEnumMember:
+		return "enumMember"
+	case SymbolKindStruct:
+		return "struct"
+	case SymbolKindEvent:
+		return "event"
+	case SymbolKindOperator:
+		return "operator"
+	case SymbolKindTypeParameter:
+		return "typeParameter"
 	default:
 		return fmt.Sprintf("symbol(%d)", kind)
 	}
@@ -229,6 +251,11 @@ func (h *HoverContents) UnmarshalJSON(data []byte) error {
 			var ss string
 			if err := json.Unmarshal(raw, &ss); err == nil {
 				parts = append(parts, ss)
+			}
+		}
+		if len(parts) == 0 {
+			if len(arr) > 0 {
+				return fmt.Errorf("hover contents: unsupported format")
 			}
 		}
 		h.Kind = "markdown"

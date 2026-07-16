@@ -49,6 +49,7 @@ type Manager struct {
 func NewManager(cfg *LSPConfig, workspaceRoot string) *Manager {
 	if cfg == nil {
 		cfg = NewLSPConfig()
+		loadDefaults(cfg)
 	}
 	return &Manager{
 		config:        cfg,
@@ -192,16 +193,31 @@ func (m *Manager) newClient(name string, srv *ServerConfig, command string, args
 }
 
 // maybeMonitorRestart starts a background goroutine that watches the client
-// for crashes and restarts it when configured.
+// for crashes and restarts it when configured. Exponential backoff prevents
+// tight restart loops; a hard cap of 100 restarts guards against infinite
+// spinning when MaxRestarts is 0 (unlimited). On restart failure the monitor
+// exits; the next tool invocation will trigger a fresh start via clientForServer.
 func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Client) {
 	if !srv.ShouldRestartOnCrash() {
 		return
 	}
+	// If MaxRestarts is 0 (unlimited), cap at 100 to prevent infinite CPU spin.
+	maxRestarts := srv.MaxRestarts
+	if maxRestarts == 0 {
+		maxRestarts = 100
+	}
 	go func() {
-		<-client.done
-		for attempt := 0; srv.MaxRestarts == 0 || attempt < srv.MaxRestarts; attempt++ {
-			if attempt > 0 {
-				time.Sleep(1 * time.Second)
+		totalRestarts := 0
+		for {
+			<-client.done
+			if totalRestarts >= maxRestarts {
+				m.setStatus(name, "failed", "", "max restarts reached")
+				return
+			}
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
+			if totalRestarts > 0 {
+				delay := time.Duration(1<<min(totalRestarts-1, 5)) * time.Second
+				time.Sleep(delay)
 			}
 			m.mu.Lock()
 			if m.clients[name] != client {
@@ -209,7 +225,6 @@ func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Cl
 				return // replaced by a newer client
 			}
 			m.mu.Unlock()
-			// Only restart if the crashed client is still the one in the map
 			command, args, found := FindServerForConfig(srv)
 			if !found {
 				return
@@ -224,17 +239,16 @@ func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Cl
 			m.clients[name] = newClient
 			m.mu.Unlock()
 			ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
-			if err := newClient.Start(ctx); err != nil {
-				cancel()
-				m.setStatus(name, "failed", command, err.Error())
-				continue
-			}
+			err := newClient.Start(ctx)
 			cancel()
+			if err != nil {
+				totalRestarts++
+				m.setStatus(name, "failed", command, err.Error())
+				return // exit; next tool call will trigger a fresh start
+			}
+			totalRestarts++
 			m.setStatus(name, "loaded", command, "")
-			// Wait for the new client to crash, then loop to restart again
-			<-newClient.done
 			client = newClient
-			attempt = -1 // reset counter for new client
 		}
 	}()
 }
@@ -496,6 +510,9 @@ func (m *Manager) hasWorkspaceFiles(srv *ServerConfig) bool {
 	return false
 }
 
+// scanDir walks the workspace tree up to depth 3 (depth 0-2) to discover
+// file extensions. The limit trades off coverage against Warmup cost; deeper
+// files are still served via lazy start on first LSP tool invocation.
 func scanDir(dir string, depth int, result map[string]bool) {
 	if depth > 2 {
 		return

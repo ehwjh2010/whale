@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -128,7 +129,9 @@ func (c *Client) Start(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		conn.readLoop()
+		if err := conn.readLoop(); err != nil {
+			log.Printf("lsp %s: readLoop exited: %v", c.language, err)
+		}
 	}()
 
 	// Store fields so alive() sees them
@@ -248,6 +251,10 @@ func (c *Client) isStarting() bool {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	defer func() {
+		c.ready.Store(false)
+		c.exited.Store(false)
+	}()
 
 	if c.conn == nil {
 		return nil
@@ -280,8 +287,6 @@ func (c *Client) Close() error {
 	c.conn = nil
 	c.cmd = nil
 	c.caps = nil
-	c.ready.Store(false)
-	c.exited.Store(false)
 	return nil
 }
 
@@ -554,6 +559,8 @@ func languageIDFromPath(path string) string {
 		return "javascript"
 	case "jsx":
 		return "javascriptreact"
+	case "mjs", "cjs":
+		return "javascript"
 	case "c":
 		return "c"
 	case "cpp", "cc", "cxx":
@@ -566,9 +573,9 @@ func languageIDFromPath(path string) string {
 		return "yaml"
 	case "vue":
 		return "vue"
-	case "json":
+	case "json", "jsonc":
 		return "json"
-	case "css":
+	case "css", "scss", "less":
 		return "css"
 	case "html", "htm":
 		return "html"
