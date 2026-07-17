@@ -1,11 +1,235 @@
 package lsp
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// zzzManager builds a Manager whose only server is a fake executable (see
+// fakeExecutable in discovery_test.go) claiming the .zzz extension.
+func zzzManager(t *testing.T, mode string, startupMS int) *Manager {
+	t.Helper()
+	fake := fakeExecutable(t, t.TempDir(), "fake-lsp", mode)
+	cfg := NewLSPConfig()
+	if err := cfg.RegisterServer("zzz", &ServerConfig{
+		Command:             fake,
+		ExtensionToLanguage: map[string]string{".zzz": "zzz"},
+		StartupTimeoutMS:    startupMS,
+	}); err != nil {
+		t.Fatalf("register server: %v", err)
+	}
+	m := NewManager(cfg, t.TempDir())
+	t.Cleanup(func() { _ = m.Close() })
+	return m
+}
+
+// EnsureAllAsync must start configured servers even before Warmup has run
+// (extCache == nil): its documented contract is to fall back to starting
+// when no scan data exists yet.
+func TestEnsureAllAsyncStartsServersBeforeWarmup(t *testing.T) {
+	m := zzzManager(t, "hang", 5000)
+	m.EnsureAllAsync()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.RLock()
+		_, ok := m.clients["zzz"]
+		m.mu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("EnsureAllAsync started nothing although Warmup never ran")
+}
+
+// Build-output directories must not eat the scan quota before source
+// directories are reached.
+func TestScanDirSkipsBuildOutputDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"build", "dist", "target"} {
+		sub := filepath.Join(root, dir)
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		for i := 0; i < 100; i++ {
+			if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%03d.txt", i)), nil, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+		}
+	}
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "main.zzz"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write main.zzz: %v", err)
+	}
+	exts := map[string]bool{}
+	var n int
+	scanDir(root, 0, exts, &n, 5, 200)
+	if !exts[".zzz"] {
+		t.Fatalf("scan missed .zzz: build dirs consumed the 200-file quota (exts=%v)", exts)
+	}
+}
+
+// clientForServer (the synchronous lazy-start path used by ClientForFile /
+// ClientForLanguage) must refuse to spawn after Close, like backgroundStart.
+func TestClientForServerRefusesAfterClose(t *testing.T) {
+	m := zzzManager(t, "hang", 2000)
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	start := time.Now()
+	_, err := m.ClientForLanguage(context.Background(), "zzz")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error after Close")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("ClientForLanguage spent %v after Close; it spawned and waited on a server instead of refusing", elapsed)
+	}
+	m.mu.RLock()
+	n := len(m.clients)
+	_, attempted := m.statusCache["zzz"]
+	m.mu.RUnlock()
+	if n != 0 || attempted {
+		t.Fatalf("start attempted after Close: clients=%d statusWritten=%v", n, attempted)
+	}
+}
+
+// Close must not return until the server process has actually been reaped:
+// on Windows a killed-but-unreaped process still holds handles on its
+// working directory, breaking cleanup of temp workspaces.
+func TestCloseWaitsForProcessExit(t *testing.T) {
+	m := zzzManager(t, "hang", 30000)
+	m.ReadyClientForFile("main.zzz")
+	deadline := time.Now().Add(5 * time.Second)
+	var client *Client
+	for time.Now().Before(deadline) {
+		m.mu.RLock()
+		c := m.clients["zzz"]
+		m.mu.RUnlock()
+		if c != nil && c.isStarting() {
+			client = c
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("server never began starting")
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	client.mu.Lock()
+	procDone := client.procDone
+	client.mu.Unlock()
+	if procDone == nil {
+		t.Fatal("no process was tracked")
+	}
+	select {
+	case <-procDone:
+	default:
+		t.Fatal("Close returned before the server process was reaped")
+	}
+}
+
+// Close must cancel and wait out in-flight background starts: otherwise the
+// start goroutine can spawn its server process after Close returned, leaking
+// it with nobody left to clean up.
+func TestCloseCancelsInFlightStart(t *testing.T) {
+	m := zzzManager(t, "hang", 30000)
+	m.ReadyClientForFile("main.zzz") // async start begins
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Close blocked %v on an in-flight start; must cancel it instead", elapsed)
+	}
+	m.mu.RLock()
+	inFlight := len(m.starting)
+	clients := len(m.clients)
+	m.mu.RUnlock()
+	if inFlight != 0 || clients != 0 {
+		t.Fatalf("in-flight start survived Close: starting=%d clients=%d", inFlight, clients)
+	}
+}
+
+// After Close, late Warmup/ensureAsync activity must not spawn new servers:
+// nobody would ever close them.
+func TestBackgroundStartRefusesAfterClose(t *testing.T) {
+	m := zzzManager(t, "hang", 5000)
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	m.EnsureAllAsync()
+	time.Sleep(300 * time.Millisecond)
+	m.mu.RLock()
+	n := len(m.clients)
+	m.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("%d server(s) spawned after Close; they would leak as orphans", n)
+	}
+}
+
+func TestEnsureAsyncDoesNotBlockCaller(t *testing.T) {
+	m := zzzManager(t, "hang", 2000)
+	start := time.Now()
+	m.ReadyClientForFile("main.zzz") // triggers the background start
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("ReadyClientForFile blocked %v; server start must run in the background", elapsed)
+	}
+}
+
+func TestClientForFileQuickFailsFastOnStartFailure(t *testing.T) {
+	m := zzzManager(t, "fail", 10000)
+	start := time.Now()
+	_, _, err := m.ClientForFileQuick("main.zzz")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error for a server that exits immediately")
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("ClientForFileQuick spun %v after the start already failed; want fast failure", elapsed)
+	}
+}
+
+func TestFindServerCached(t *testing.T) {
+	m := zzzManager(t, "ok", 0)
+	srv := m.config.Servers["zzz"]
+
+	// A fresh negative entry short-circuits discovery even though the
+	// binary exists.
+	m.mu.Lock()
+	m.foundCache["zzz"] = foundEntry{found: false, checkedAt: time.Now()}
+	m.mu.Unlock()
+	if _, _, found := m.findServerCached("zzz", srv); found {
+		t.Fatal("fresh negative cache entry must short-circuit discovery")
+	}
+
+	// An expired negative entry is re-checked and finds the binary.
+	m.mu.Lock()
+	m.foundCache["zzz"] = foundEntry{found: false, checkedAt: time.Now().Add(-2 * notFoundRetryTTL)}
+	m.mu.Unlock()
+	if _, _, found := m.findServerCached("zzz", srv); !found {
+		t.Fatal("expired negative entry must re-run discovery")
+	}
+
+	// A positive entry is served from the cache verbatim.
+	m.mu.Lock()
+	m.foundCache["zzz"] = foundEntry{path: "/cached/fake-lsp", found: true, checkedAt: time.Now().Add(-time.Hour)}
+	m.mu.Unlock()
+	if path, _, found := m.findServerCached("zzz", srv); !found || path != "/cached/fake-lsp" {
+		t.Fatalf("positive entry must be served from cache, got %q found=%v", path, found)
+	}
+}
 
 func TestNewManager(t *testing.T) {
 	m := NewManager(nil, "/workspace")
@@ -452,6 +676,12 @@ func TestManager_HasWorkspaceFiles_Multiple(t *testing.T) {
 }
 
 func TestManager_ClientForFileQuick_FirstAttempt(t *testing.T) {
+	// Isolate discovery: with a real gopls on PATH this would spawn it and
+	// (on a warm start) return a ready client instead of the expected error.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PATH", t.TempDir())
 	m := NewManager(nil, "/w")
 	_, _, err := m.ClientForFileQuick("test.go")
 	if err == nil {
@@ -460,18 +690,17 @@ func TestManager_ClientForFileQuick_FirstAttempt(t *testing.T) {
 }
 
 func TestManager_ClientForFileQuick_AlreadyStarting(t *testing.T) {
-	m := NewManager(nil, "/w")
-	_, _, _ = m.ReadyClientForFile("test.go")
+	m := zzzManager(t, "hang", 5000)
+	// A client mid-startup outside backgroundStart (clientForServer path):
+	// no in-flight attempt channel, but isStarting reports true.
+	c := &Client{language: "zzz"}
+	c.starting.Store(true)
 	m.mu.Lock()
-	if c, ok := m.clients["go"]; ok {
-		c.starting.Store(true)
-	}
+	m.clients["zzz"] = c
 	m.mu.Unlock()
-	_, _, err := m.ClientForFileQuick("test.go")
-	if err != nil {
-		if !strings.Contains(err.Error(), "starting up") {
-			t.Fatalf("unexpected error: %v", err)
-		}
+	_, _, err := m.ClientForFileQuick("test.zzz")
+	if err == nil || !strings.Contains(err.Error(), "starting up") {
+		t.Fatalf("expected still-starting error, got: %v", err)
 	}
 }
 

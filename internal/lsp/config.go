@@ -28,7 +28,7 @@
 //	      "extensionToLanguage": {".go": "go"}
 //	    },
 //	    "python": {
-//	      "command": "pyright",
+//	      "command": "pyright-langserver",
 //	      "args": ["--stdio"],
 //	      "extensionToLanguage": {".py": "python", ".pyi": "python"},
 //	      "install_help": "pip install pyright"
@@ -161,11 +161,19 @@ func (c *LSPConfig) RegisterServer(name string, srv *ServerConfig) error {
 	if err := srv.Validate(); err != nil {
 		return fmt.Errorf("server %q: %w", name, err)
 	}
+	var claimedNow []string
 	for ext := range srv.ExtensionToLanguage {
 		if owner, ok := c.claimed[ext]; ok {
+			// Roll back claims made in this call: a rejected server must
+			// not leave extensions pointing at a name that was never
+			// registered (ForExtension would return a nil ServerConfig).
+			for _, e := range claimedNow {
+				delete(c.claimed, e)
+			}
 			return fmt.Errorf("extension %s already claimed by server %q, server %q skipped", ext, owner, name)
 		}
 		c.claimed[ext] = name
+		claimedNow = append(claimedNow, ext)
 	}
 	c.Servers[name] = srv
 	return nil
@@ -232,7 +240,9 @@ func LoadLSPConfig(path string) (*LSPConfig, error) {
 			delete(cfg.Servers, name)
 			if err := cfg.RegisterServer(name, srv); err != nil {
 				fmt.Fprintf(os.Stderr, "whale: lsp: skipping server %q from user config: %v (keeping default)\n", name, err)
-				cfg.RegisterServer(name, saved)
+				if rerr := cfg.RegisterServer(name, saved); rerr != nil {
+					fmt.Fprintf(os.Stderr, "whale: lsp: restoring default server %q failed: %v\n", name, rerr)
+				}
 				continue
 			}
 		} else {
@@ -307,7 +317,7 @@ func loadDefaults(cfg *LSPConfig) {
 			InstallHelp:         "rustup component add rust-analyzer",
 		},
 		"python": {
-			Command: "pyright", Args: []string{"--stdio"},
+			Command: "pyright-langserver", Args: []string{"--stdio"},
 			ExtensionToLanguage: map[string]string{".py": "python", ".pyi": "python"},
 			InstallHelp:         "npm install -g pyright",
 		},

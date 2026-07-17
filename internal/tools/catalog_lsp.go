@@ -49,6 +49,11 @@ import (
 )
 
 // lspClient abstracts the subset of *lsp.Client used by tool handlers.
+// lspRequestTimeout bounds every LSP request issued by tool handlers. A
+// server that completed the handshake can still queue requests while
+// indexing; without a deadline the tool call hangs indefinitely.
+const lspRequestTimeout = 10 * time.Second
+
 type lspClient interface {
 	GoToDefinition(ctx context.Context, uri string, line, character int) ([]lsp.Location, error)
 	FindReferences(ctx context.Context, uri string, line, character int, includeDeclaration bool) ([]lsp.Location, error)
@@ -254,21 +259,21 @@ func lspFriendlyError(err error) string {
 
 func (b *Toolset) lspGoToDefinition(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "definition",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.GoToDefinition(ctx, uri, line, character)
 		})
 }
 
 func (b *Toolset) lspFindReferences(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "references",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.FindReferences(ctx, uri, line, character, includeDeclaration)
 		})
 }
 
 func (b *Toolset) lspHover(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "hover",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.Hover(ctx, uri, line, character)
 		})
 }
@@ -295,7 +300,7 @@ func (b *Toolset) lspDocumentSymbol(ctx context.Context, call core.ToolCall) (co
 		return marshalToolError(call, "lsp_not_ready", err.Error()), nil
 	}
 
-	lspCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	lspCtx, cancel := context.WithTimeout(ctx, lspRequestTimeout)
 	defer cancel()
 
 	symbols, err := client.DocumentSymbols(lspCtx, uri)
@@ -332,7 +337,7 @@ func writeDocumentSymbols(md *strings.Builder, symbols []lsp.DocumentSymbol, dep
 
 func (b *Toolset) lspGoToImplementation(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "implementation",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.GoToImplementation(ctx, uri, line, character)
 		})
 }
@@ -341,14 +346,14 @@ func (b *Toolset) lspGoToImplementation(ctx context.Context, call core.ToolCall)
 
 func (b *Toolset) lspPrepareCallHierarchy(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "call hierarchy",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			return client.PrepareCallHierarchy(ctx, uri, line, character)
 		})
 }
 
 func (b *Toolset) lspIncomingCalls(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "incoming calls",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			items, err := client.PrepareCallHierarchy(ctx, uri, line, character)
 			if err != nil {
 				return nil, err
@@ -367,7 +372,7 @@ func (b *Toolset) lspIncomingCalls(ctx context.Context, call core.ToolCall) (cor
 
 func (b *Toolset) lspOutgoingCalls(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	return b.runLSPPositionOp(ctx, call, "outgoing calls",
-		func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
+		func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error) {
 			items, err := client.PrepareCallHierarchy(ctx, uri, line, character)
 			if err != nil {
 				return nil, err
@@ -405,12 +410,15 @@ func (b *Toolset) lspWorkspaceSymbol(ctx context.Context, call core.ToolCall) (c
 	}
 	p.ensureAllAsync()
 	for _, name := range p.readyLanguages() {
-		client, err := p.clientForLanguage(ctx, name)
-		if err != nil {
-			errs = append(errs, err.Error())
-			continue
-		}
-		symbols, err := client.WorkspaceSymbols(ctx, in.Query)
+		symbols, err := func() ([]lsp.SymbolInformation, error) {
+			lspCtx, cancel := context.WithTimeout(ctx, lspRequestTimeout)
+			defer cancel()
+			client, err := p.clientForLanguage(lspCtx, name)
+			if err != nil {
+				return nil, err
+			}
+			return client.WorkspaceSymbols(lspCtx, in.Query)
+		}()
 		if err != nil {
 			errs = append(errs, err.Error())
 			continue
@@ -451,7 +459,7 @@ func (b *Toolset) lspWorkspaceSymbol(ctx context.Context, call core.ToolCall) (c
 
 func (b *Toolset) runLSPPositionOp(
 	ctx context.Context, call core.ToolCall, opName string,
-	op func(client lspClient, uri string, line, character int, includeDeclaration bool) (any, error),
+	op func(ctx context.Context, client lspClient, uri string, line, character int, includeDeclaration bool) (any, error),
 ) (core.ToolResult, error) {
 	var in struct {
 		FilePath           string `json:"file_path"`
@@ -489,7 +497,11 @@ func (b *Toolset) runLSPPositionOp(
 		includeDecl = *in.IncludeDeclaration
 	}
 
-	result, err := op(client, uri, in.Line, in.Character, includeDecl)
+	// Bound the request: a server that is ready but still indexing can
+	// queue requests for minutes; without a deadline the tool hangs.
+	lspCtx, cancel := context.WithTimeout(ctx, lspRequestTimeout)
+	defer cancel()
+	result, err := op(lspCtx, client, uri, in.Line, in.Character, includeDecl)
 	if err != nil {
 		return marshalToolError(call, "lsp_call_failed", lspFriendlyError(err)), nil
 	}

@@ -2,10 +2,11 @@ package lsp
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsWindows(t *testing.T) {
@@ -105,6 +106,41 @@ func TestFindServerForConfig_KnownInstallDir(t *testing.T) {
 		if !strings.EqualFold(path, exePath) && !strings.Contains(path, exeName) {
 			t.Fatalf("expected path %q, got %q", exePath, path)
 		}
+	}
+}
+
+func TestFindServerForConfig_VSCodeFallbackDoesNotDuplicateArgs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	binDir := filepath.Join(home, ".vscode", "extensions", "ms-python.vscode-pylance-2024.1.0", "dist", "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	exe := "pyright-langserver"
+	if isWindows() {
+		exe += ".cmd"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, exe), []byte("dummy"), 0o755); err != nil {
+		t.Fatalf("write fake server: %v", err)
+	}
+	// Keep PATH from resolving a real binary.
+	t.Setenv("PATH", t.TempDir())
+
+	srv := &ServerConfig{
+		Command:             "pyright-langserver",
+		Args:                []string{"--stdio"},
+		ExtensionToLanguage: map[string]string{".py": "python"},
+	}
+	path, args, found := FindServerForConfig(srv)
+	if !found {
+		t.Fatal("expected to find pylance-bundled server")
+	}
+	if !strings.Contains(path, "pylance") {
+		t.Fatalf("expected vscode fallback path, got %q", path)
+	}
+	if want := []string{"--stdio"}; !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %v, want %v (fallback args must not be duplicated with configured args)", args, want)
 	}
 }
 
@@ -278,22 +314,85 @@ func TestIsRustupProxy_OutsideCargoBin(t *testing.T) {
 	}
 }
 
-func TestIsRustupProxy_ValidBinary(t *testing.T) {
-	// real rust-analyzer (after component install) should not be flagged
-	path, _, found := FindServerForConfig(&ServerConfig{
+// TestMain lets this test binary impersonate an executable under test:
+// discovery and client code probe/spawn binaries, and a copied test binary
+// behaves according to WHALE_LSP_FAKE_MODE before any tests run. This keeps
+// process-related tests hermetic (no real servers, no timing dependence).
+func TestMain(m *testing.M) {
+	switch os.Getenv("WHALE_LSP_FAKE_MODE") {
+	case "ok":
+		os.Exit(0)
+	case "fail":
+		os.Exit(1)
+	case "hang":
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// fakeExecutable copies the test binary to dir/name (adding .exe on Windows)
+// and selects its behavior via WHALE_LSP_FAKE_MODE (see TestMain).
+func fakeExecutable(t *testing.T, dir, name, mode string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if isWindows() {
+		name += ".exe"
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatalf("read test binary: %v", err)
+	}
+	dst := filepath.Join(dir, name)
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatalf("install fake executable: %v", err)
+	}
+	t.Setenv("WHALE_LSP_FAKE_MODE", mode)
+	return dst
+}
+
+// fakeRustAnalyzer installs a fake rust-analyzer under a temp home's
+// .cargo/bin and points HOME/USERPROFILE at that home.
+func fakeRustAnalyzer(t *testing.T, mode string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return fakeExecutable(t, filepath.Join(home, ".cargo", "bin"), "rust-analyzer", mode)
+}
+
+// The rustup proxy shim lives in ~/.cargo/bin, which rustup puts on PATH —
+// so the guard must also apply to the exec.LookPath hit, not only to the
+// knownInstallDirs fallback.
+func TestFindServerForConfig_SkipsRustupProxyOnPath(t *testing.T) {
+	stub := fakeRustAnalyzer(t, "fail")
+	t.Setenv("PATH", filepath.Dir(stub))
+	_, _, found := FindServerForConfig(&ServerConfig{
 		Command:             "rust-analyzer",
 		ExtensionToLanguage: map[string]string{".rs": "rust"},
 	})
-	if !found {
-		t.Skip("rust-analyzer not found on this system")
+	if found {
+		t.Fatal("rustup proxy stub on PATH must be skipped, not returned as a working server")
 	}
-	// On CI runners ~/.cargo/bin/rust-analyzer is often a rustup proxy
-	// stub whose --version fails; only a working binary must pass.
-	if exec.Command(path, "--version").Run() != nil {
-		t.Skip("rust-analyzer on this system is a rustup proxy stub")
-	}
+}
+
+func TestIsRustupProxy_WorkingBinaryNotFlagged(t *testing.T) {
+	path := fakeRustAnalyzer(t, "ok")
 	if isRustupProxy(path) {
 		t.Fatalf("working rust-analyzer at %s should not be flagged as proxy", path)
+	}
+}
+
+func TestIsRustupProxy_StubFlagged(t *testing.T) {
+	path := fakeRustAnalyzer(t, "fail")
+	if !isRustupProxy(path) {
+		t.Fatalf("failing rustup proxy stub at %s should be flagged", path)
 	}
 }
 

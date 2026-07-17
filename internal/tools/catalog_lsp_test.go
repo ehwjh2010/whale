@@ -136,6 +136,51 @@ func lspTC(name string, in any) core.ToolCall {
 	return tc(name, in)
 }
 
+func TestLSPPositionOpAppliesRequestTimeout(t *testing.T) {
+	var gotDeadline bool
+	mc := &mockClient{
+		goToDefFn: func(ctx context.Context, uri string, line, character int) ([]lsp.Location, error) {
+			_, gotDeadline = ctx.Deadline()
+			return []lsp.Location{}, nil
+		},
+	}
+	p := &mockProvider{
+		readyFileFn: func(filePath string) (lspClient, string, bool) { return mc, "mock", true },
+	}
+	ts := toolsetWithProvider(t, p)
+	res, _ := ts.lspGoToDefinition(context.Background(), lspTC("lsp_goto_definition", map[string]any{
+		"file_path": "test.go", "line": 0, "character": 0,
+	}))
+	if res.IsError() {
+		t.Fatalf("unexpected error: %s", res.ModelText)
+	}
+	if !gotDeadline {
+		t.Fatal("position op must run under a request timeout (a ctx without deadline reached the client)")
+	}
+}
+
+func TestLSPWorkspaceSymbolAppliesRequestTimeout(t *testing.T) {
+	var gotDeadline bool
+	mc := &mockClient{
+		workspaceSymFn: func(ctx context.Context, query string) ([]lsp.SymbolInformation, error) {
+			_, gotDeadline = ctx.Deadline()
+			return []lsp.SymbolInformation{{Name: "X"}}, nil
+		},
+	}
+	p := &mockProvider{
+		readyLangsFn:    func() []string { return []string{"go"} },
+		clientForLangFn: func(ctx context.Context, langName string) (lspClient, error) { return mc, nil },
+	}
+	ts := toolsetWithProvider(t, p)
+	res, _ := ts.lspWorkspaceSymbol(context.Background(), lspTC("lsp_workspace_symbol", map[string]any{"query": "X"}))
+	if res.IsError() {
+		t.Fatalf("unexpected error: %s", res.ModelText)
+	}
+	if !gotDeadline {
+		t.Fatal("workspace symbol query must run under a request timeout")
+	}
+}
+
 func TestLSPTools_NilManager(t *testing.T) {
 	dir := t.TempDir()
 	ts, err := NewToolset(dir)

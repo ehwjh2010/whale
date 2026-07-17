@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ type Client struct {
 	settings              any               // sent via workspace/didChangeConfiguration
 	startupTimeout        time.Duration     // max time for initialize handshake
 	shutdownTimeout       time.Duration     // max time for graceful shutdown
+	languageByExt         map[string]string // extension → languageID (from server config)
 
 	mu         sync.Mutex
 	conn       *rpcConn
@@ -49,13 +51,26 @@ type Client struct {
 	caps       *ServerCapabilities
 	cancel     context.CancelFunc
 	done       chan struct{}
-	ready      atomic.Bool          // true after initialize handshake completes
-	readyCh    chan struct{}        // closed when ready becomes true
-	starting   atomic.Bool          // true while a Start() call is in progress
-	exited     atomic.Bool          // true after cmd.Wait() returns
-	stderrDone chan struct{}        // closed when stderr reader goroutine finishes
-	stderrBuf  *strings.Builder     // captured stderr for crash diagnostics
-	openDocs   map[string]time.Time // URI → last modTime sent via didOpen
+	ready      atomic.Bool             // true after initialize handshake completes
+	readyCh    chan struct{}           // closed when ready becomes true
+	starting   atomic.Bool             // true while a Start() call is in progress
+	exited     atomic.Bool             // true after cmd.Wait() returns
+	procDone   chan struct{}           // closed once cmd.Wait() has reaped the process
+	cleanup    *shell.CommandCleanup   // kills the whole process tree (job object on Windows)
+	stderrDone chan struct{}           // closed when stderr reader goroutine finishes
+	stderrBuf  *strings.Builder        // captured stderr for crash diagnostics
+	openDocs   map[string]openDocState // URI → didOpen state (bounded by maxOpenDocs)
+}
+
+// maxOpenDocs bounds how many documents stay open per server. Servers keep
+// parsed state for every open document, so an unbounded set grows their
+// memory with each didOpen; the least-recently-used document is closed once
+// the limit is exceeded.
+const maxOpenDocs = 64
+
+type openDocState struct {
+	modTime  time.Time // last modTime sent via didOpen
+	lastUsed time.Time // last time a request touched this document
 }
 
 // Start launches the language server process and performs the LSP handshake.
@@ -86,11 +101,20 @@ func (c *Client) Start(ctx context.Context) error {
 		return fmt.Errorf("language server start failed")
 	}
 	if c.openDocs == nil {
-		c.openDocs = make(map[string]time.Time)
+		c.openDocs = make(map[string]openDocState)
 	}
 	c.readyCh = make(chan struct{})
+	readyCh := c.readyCh
 	c.mu.Unlock()
 	defer c.starting.Store(false)
+	// Release concurrent waiters even when startup fails (they check
+	// c.ready to tell success from failure). Runs before the starting
+	// flag is cleared, so no new Start can have replaced readyCh yet.
+	defer func() {
+		if !c.ready.Load() {
+			close(readyCh)
+		}
+	}()
 
 	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, c.command, c.args...)
@@ -119,6 +143,10 @@ func (c *Client) Start(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("start %s: %w", c.language, err)
 	}
+	// Attach after Start: the job object needs the live process handle to
+	// cover the whole tree (a language server may spawn helpers such as
+	// `go list` that hold handles on the workspace).
+	cleanup := shell.AttachCommandCleanup(cmd)
 
 	stderrBuf := new(strings.Builder)
 	stderrDone := make(chan struct{})
@@ -137,6 +165,19 @@ func (c *Client) Start(ctx context.Context) error {
 		conn.readLoop()
 	}()
 
+	// Wait for the process in the background to release OS resources.
+	// procDone signals that the process has actually been reaped — on
+	// Windows an unreaped process still holds handles on its working
+	// directory.
+	procDone := make(chan struct{})
+	go func() {
+		defer close(procDone)
+		if err := cmd.Wait(); err != nil {
+			fmt.Fprintf(stderrBuf, "process exited: %v\n", err)
+		}
+		c.exited.Store(true)
+	}()
+
 	// Store fields so alive() sees them
 	c.mu.Lock()
 	c.conn = conn
@@ -145,15 +186,9 @@ func (c *Client) Start(ctx context.Context) error {
 	c.stderrBuf = stderrBuf
 	c.stderrDone = stderrDone
 	c.done = done
+	c.procDone = procDone
+	c.cleanup = cleanup
 	c.mu.Unlock()
-
-	// Wait for process in background to release OS resources
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			fmt.Fprintf(stderrBuf, "process exited: %v\n", err)
-		}
-		c.exited.Store(true)
-	}()
 
 	// Slow: initialize handshake (gopls may take seconds)
 	var initResult InitializeResult
@@ -186,12 +221,7 @@ func (c *Client) Start(ctx context.Context) error {
 		},
 	}, &initResult)
 	if err != nil {
-		cancel()
-		cmd.Process.Kill()
-		<-stderrDone
-		c.mu.Lock()
-		c.conn = nil
-		c.mu.Unlock()
+		c.abortStart(cancel, cleanup, procDone, stderrDone)
 		if stderrBuf.Len() > 0 {
 			return fmt.Errorf("initialize: %w (stderr: %s)", err, stderrBuf.String())
 		}
@@ -200,12 +230,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Send initialized notification
 	if err := conn.sendNotification("initialized", struct{}{}); err != nil {
-		cancel()
-		cmd.Process.Kill()
-		<-stderrDone
-		c.mu.Lock()
-		c.conn = nil
-		c.mu.Unlock()
+		c.abortStart(cancel, cleanup, procDone, stderrDone)
 		if stderrBuf.Len() > 0 {
 			return fmt.Errorf("initialized: %w (stderr: %s)", err, stderrBuf.String())
 		}
@@ -223,8 +248,34 @@ func (c *Client) Start(ctx context.Context) error {
 	c.caps = &initResult.Capabilities
 	c.mu.Unlock()
 	c.ready.Store(true)
-	close(c.readyCh)
+	close(readyCh)
 	return nil
+}
+
+// abortStart tears down a partially-started server: kill the process, then
+// wait (bounded) until it is reaped so no directory handles survive.
+// abortStart tears down a partially-started server: kill its process tree,
+// then wait (bounded) until the process is reaped so no directory handles
+// survive.
+func (c *Client) abortStart(cancel context.CancelFunc, cleanup *shell.CommandCleanup, procDone, stderrDone chan struct{}) {
+	cancel()
+	_ = cleanup.Cleanup()
+	<-stderrDone
+	select {
+	case <-procDone:
+	case <-time.After(3 * time.Second):
+	}
+	c.mu.Lock()
+	c.conn = nil
+	c.mu.Unlock()
+}
+
+// readyChan returns the channel closed when the in-flight Start attempt
+// finishes (successfully or not). Nil if no Start has begun yet.
+func (c *Client) readyChan() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readyCh
 }
 
 // alive reports whether the server process and connection are still healthy.
@@ -269,6 +320,8 @@ func (c *Client) Close() error {
 	defer func() {
 		c.ready.Store(false)
 		c.exited.Store(false)
+		// The next process knows nothing about previously opened documents.
+		c.openDocs = nil
 	}()
 
 	if c.conn == nil {
@@ -295,8 +348,21 @@ func (c *Client) Close() error {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	if c.cmd != nil && c.cmd.Process != nil {
+	if c.cleanup != nil {
+		// Kill the whole tree: helpers spawned by the server (e.g. go list)
+		// hold handles on the workspace too.
+		_ = c.cleanup.Cleanup()
+	} else if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
+	}
+	// Wait until the process is actually reaped: an unreaped process still
+	// holds handles on its working directory (breaks temp-dir cleanup on
+	// Windows and leaks the process elsewhere).
+	if c.procDone != nil {
+		select {
+		case <-c.procDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	c.conn = nil
@@ -328,7 +394,10 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 
 	// Skip if the file hasn't changed since the last didOpen.
 	c.mu.Lock()
-	if prev, ok := c.openDocs[uri]; ok && prev.Equal(info.ModTime()) {
+	prev, wasOpen := c.openDocs[uri]
+	if wasOpen && prev.modTime.Equal(info.ModTime()) {
+		prev.lastUsed = time.Now()
+		c.openDocs[uri] = prev
 		c.mu.Unlock()
 		return nil
 	}
@@ -339,7 +408,15 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 		return fmt.Errorf("read file for didOpen: %w", err)
 	}
 
-	langID := languageIDFromPath(path)
+	langID := languageIDFromPath(c, path)
+
+	// The LSP spec forbids didOpen for an already-open document (servers
+	// keep the stale buffer); close the old version first.
+	if wasOpen {
+		_ = conn.sendNotification("textDocument/didClose", struct {
+			TextDocument TextDocumentIdentifier `json:"textDocument"`
+		}{TextDocument: TextDocumentIdentifier{URI: uri}})
+	}
 
 	err = conn.sendNotification("textDocument/didOpen", struct {
 		TextDocument TextDocumentItem `json:"textDocument"`
@@ -356,9 +433,42 @@ func (c *Client) ensureDocumentOpen(ctx context.Context, uri string) error {
 	}
 
 	c.mu.Lock()
-	c.openDocs[uri] = info.ModTime()
+	if c.openDocs == nil {
+		c.openDocs = make(map[string]openDocState)
+	}
+	c.openDocs[uri] = openDocState{modTime: info.ModTime(), lastUsed: time.Now()}
+	evicted := evictOldestDocs(c.openDocs, maxOpenDocs, uri)
 	c.mu.Unlock()
+	for _, u := range evicted {
+		_ = conn.sendNotification("textDocument/didClose", struct {
+			TextDocument TextDocumentIdentifier `json:"textDocument"`
+		}{TextDocument: TextDocumentIdentifier{URI: u}})
+	}
 	return nil
+}
+
+// evictOldestDocs removes least-recently-used entries until docs is within
+// limit, never evicting keep. Returns the removed URIs.
+func evictOldestDocs(docs map[string]openDocState, limit int, keep string) []string {
+	var evicted []string
+	for len(docs) > limit {
+		oldest := ""
+		var oldestAt time.Time
+		for u, d := range docs {
+			if u == keep {
+				continue
+			}
+			if oldest == "" || d.lastUsed.Before(oldestAt) {
+				oldest, oldestAt = u, d.lastUsed
+			}
+		}
+		if oldest == "" {
+			return evicted
+		}
+		delete(docs, oldest)
+		evicted = append(evicted, oldest)
+	}
+	return evicted
 }
 
 // GoToDefinition returns the definition locations for a symbol.
@@ -556,50 +666,59 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 }
 
 // languageIDFromPath returns a LSP language ID for a file path.
-func languageIDFromPath(path string) string {
-	ext := ""
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '.' {
-			ext = path[i+1:]
-			break
+// languageIDFromPath returns a LSP language ID for a file path. When the
+// client carries an extension→language mapping (from the server config), it
+// is used; otherwise a built-in table provides reasonable defaults for the
+// most common file types, falling back to the bare extension.
+func languageIDFromPath(c *Client, path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if c.languageByExt != nil {
+		if id, ok := c.languageByExt[ext]; ok {
+			return id
 		}
 	}
+	// The extension may be empty for dot-files or extensionless paths; the
+	// built-in table covers known languages; everything else falls through
+	// to the bare extension.
 	switch ext {
-	case "go":
+	case ".go":
 		return "go"
-	case "rs":
+	case ".rs":
 		return "rust"
-	case "py", "pyi":
+	case ".py", ".pyi":
 		return "python"
-	case "ts":
+	case ".ts":
 		return "typescript"
-	case "tsx":
+	case ".tsx":
 		return "typescriptreact"
-	case "js":
+	case ".js":
 		return "javascript"
-	case "jsx":
+	case ".jsx":
 		return "javascriptreact"
-	case "mjs", "cjs":
+	case ".mjs", ".cjs":
 		return "javascript"
-	case "c":
+	case ".c":
 		return "c"
-	case "cpp", "cc", "cxx":
+	case ".cpp", ".cc", ".cxx":
 		return "cpp"
-	case "h":
+	case ".h":
 		return "c"
-	case "hpp", "hxx":
+	case ".hpp", ".hxx":
 		return "cpp"
-	case "yaml", "yml":
+	case ".yaml", ".yml":
 		return "yaml"
-	case "vue":
+	case ".vue":
 		return "vue"
-	case "json", "jsonc":
+	case ".json", ".jsonc":
 		return "json"
-	case "css", "scss", "less":
+	case ".css", ".scss", ".less":
 		return "css"
-	case "html", "htm":
+	case ".html", ".htm":
 		return "html"
 	default:
+		if ext != "" && ext[0] == '.' {
+			return ext[1:]
+		}
 		return ext
 	}
 }

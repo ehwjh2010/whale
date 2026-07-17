@@ -1,10 +1,204 @@
 package lsp
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
-
 	"testing"
+	"time"
 )
+
+// notifCaptureClient returns a Client whose rpcConn writes into a buffer,
+// plus a func decoding the buffered frames into JSON-RPC method names.
+func notifCaptureClient(t *testing.T) (*Client, func() []string) {
+	t.Helper()
+	var buf bytes.Buffer
+	c := &Client{
+		language:        "zzz",
+		openDocs:        make(map[string]openDocState),
+		conn:            newRPCConn(strings.NewReader(""), &buf),
+		shutdownTimeout: 50 * time.Millisecond,
+	}
+	methods := func() []string {
+		r := NewReader(bytes.NewReader(buf.Bytes()))
+		var out []string
+		for {
+			data, err := r.ReadMessage()
+			if err != nil {
+				return out
+			}
+			var m Message
+			if json.Unmarshal(data, &m) == nil && m.Method != "" {
+				out = append(out, m.Method)
+			}
+		}
+	}
+	return c, methods
+}
+
+func writeTestDoc(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "doc.zzz")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write doc: %v", err)
+	}
+	return path
+}
+
+func TestEnsureDocumentOpenSkipsUnchanged(t *testing.T) {
+	c, methods := notifCaptureClient(t)
+	uri := PathToURI(writeTestDoc(t, "one"))
+	for i := 0; i < 2; i++ {
+		if err := c.ensureDocumentOpen(context.Background(), uri); err != nil {
+			t.Fatalf("ensureDocumentOpen: %v", err)
+		}
+	}
+	want := []string{"textDocument/didOpen"}
+	if got := methods(); !equalStrings(got, want) {
+		t.Fatalf("methods = %v, want %v", got, want)
+	}
+}
+
+// A changed file must not be re-announced with a bare didOpen: the LSP spec
+// forbids didOpen for an already-open document (servers keep the stale
+// buffer). The client must close the old document first.
+func TestEnsureDocumentOpenReopensChangedFile(t *testing.T) {
+	c, methods := notifCaptureClient(t)
+	path := writeTestDoc(t, "one")
+	uri := PathToURI(path)
+	if err := c.ensureDocumentOpen(context.Background(), uri); err != nil {
+		t.Fatalf("first ensureDocumentOpen: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("two"), 0o644); err != nil {
+		t.Fatalf("rewrite doc: %v", err)
+	}
+	bumped := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, bumped, bumped); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if err := c.ensureDocumentOpen(context.Background(), uri); err != nil {
+		t.Fatalf("second ensureDocumentOpen: %v", err)
+	}
+	want := []string{"textDocument/didOpen", "textDocument/didClose", "textDocument/didOpen"}
+	if got := methods(); !equalStrings(got, want) {
+		t.Fatalf("methods = %v, want %v", got, want)
+	}
+}
+
+func TestOpenDocsEvictionBounded(t *testing.T) {
+	c, methods := notifCaptureClient(t)
+	dir := t.TempDir()
+	for i := 0; i <= maxOpenDocs; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("doc%03d.zzz", i))
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write doc: %v", err)
+		}
+		if err := c.ensureDocumentOpen(context.Background(), PathToURI(path)); err != nil {
+			t.Fatalf("ensureDocumentOpen %d: %v", i, err)
+		}
+	}
+	c.mu.Lock()
+	n := len(c.openDocs)
+	c.mu.Unlock()
+	if n > maxOpenDocs {
+		t.Fatalf("openDocs holds %d entries, limit is %d", n, maxOpenDocs)
+	}
+	var closes int
+	for _, m := range methods() {
+		if m == "textDocument/didClose" {
+			closes++
+		}
+	}
+	if closes == 0 {
+		t.Fatal("expected a didClose for the evicted document")
+	}
+}
+
+func TestLanguageIDFromPathRespectsExtensionToLanguage(t *testing.T) {
+	c := &Client{language: "zzz", languageByExt: map[string]string{".zzz": "cool-lang"}}
+	uri := PathToURI(writeTestDoc(t, "x"))
+	// Without a conn ensureDocumentOpen will fail, but languageIDFromPath
+	// is called first — its result determines the didOpen payload.
+	got := languageIDFromPath(c, URIToPath(uri))
+	if got != "cool-lang" {
+		t.Fatalf("languageID = %q, want %q (config mapping bypassed)", got, "cool-lang")
+	}
+}
+
+func TestCloseClearsOpenDocs(t *testing.T) {
+	c, _ := notifCaptureClient(t)
+	uri := PathToURI(writeTestDoc(t, "one"))
+	if err := c.ensureDocumentOpen(context.Background(), uri); err != nil {
+		t.Fatalf("ensureDocumentOpen: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	c.mu.Lock()
+	n := len(c.openDocs)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("openDocs has %d entries after Close; a restarted server would never receive didOpen", n)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestStartFailureReleasesConcurrentWaiter: when the winning Start attempt
+// fails, a concurrent Start waiting on readyCh must be released promptly
+// instead of sitting out the full startupTimeout.
+func TestStartFailureReleasesConcurrentWaiter(t *testing.T) {
+	fake := fakeExecutable(t, t.TempDir(), "fake-lsp", "fail")
+	c := &Client{
+		language:        "zzz",
+		command:         fake,
+		rootURI:         PathToURI(t.TempDir()),
+		startupTimeout:  10 * time.Second,
+		shutdownTimeout: time.Second,
+	}
+	winnerErr := make(chan error, 1)
+	go func() { winnerErr <- c.Start(context.Background()) }()
+	// Wait until the winner holds the starting flag — bounded, because on a
+	// slow machine the winner may already have failed and released it.
+	waitUntil := time.Now().Add(3 * time.Second)
+	for !c.isStarting() && time.Now().Before(waitUntil) {
+		select {
+		case err := <-winnerErr:
+			// Winner already finished; the "loser" below simply becomes a
+			// fresh start attempt, which must also fail fast.
+			winnerErr <- err
+			waitUntil = time.Now()
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	start := time.Now()
+	err := c.Start(context.Background())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected loser Start to fail")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("loser waited %v; must be released when the winner fails", elapsed)
+	}
+	if werr := <-winnerErr; werr == nil {
+		t.Fatal("expected winner Start to fail")
+	}
+}
 
 func TestMergeEnv_MergeWithOverrides(t *testing.T) {
 	base := []string{"HOME=/home/user", "PATH=/usr/bin", "LANG=en"}
@@ -101,7 +295,7 @@ func TestLanguageIDFromPath(t *testing.T) {
 		{"Makefile", ""},
 	}
 	for _, tc := range tests {
-		got := languageIDFromPath(tc.path)
+		got := languageIDFromPath(&Client{}, tc.path)
 		if got != tc.want {
 			t.Errorf("languageIDFromPath(%q) = %q, want %q", tc.path, got, tc.want)
 		}
@@ -109,14 +303,14 @@ func TestLanguageIDFromPath(t *testing.T) {
 }
 
 func TestLanguageIDFromPath_Empty(t *testing.T) {
-	got := languageIDFromPath("")
+	got := languageIDFromPath(&Client{}, "")
 	if got != "" {
 		t.Fatalf("expected empty, got %q", got)
 	}
 }
 
 func TestLanguageIDFromPath_Windows(t *testing.T) {
-	got := languageIDFromPath(`C:\Users\test\main.go`)
+	got := languageIDFromPath(&Client{}, `C:\Users\test\main.go`)
 	if got != "go" {
 		t.Fatalf("expected go, got %q", got)
 	}

@@ -15,7 +15,11 @@ func FindServerForConfig(srv *ServerConfig) (string, []string, bool) {
 	args := append([]string{}, srv.Args...)
 
 	if path, err := exec.LookPath(name); err == nil {
-		return path, args, true
+		// rustup's proxy shim usually sits on PATH (~/.cargo/bin); a hit
+		// here must pass the same guard as the install-dir fallback.
+		if !isRustupProxy(path) {
+			return path, args, true
+		}
 	}
 
 	for _, dir := range knownInstallDirs() {
@@ -33,7 +37,12 @@ func FindServerForConfig(srv *ServerConfig) (string, []string, bool) {
 	}
 
 	if path, extArgs, found := vscodeExtensionServer(srv); found {
-		return path, append(extArgs, args...), true
+		// The fallback returns the complete args for the binary it found;
+		// appending srv.Args on top would duplicate flags like --stdio.
+		if len(extArgs) > 0 {
+			return path, extArgs, true
+		}
+		return path, args, true
 	}
 
 	return name, args, false

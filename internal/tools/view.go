@@ -101,6 +101,15 @@ func (b *Toolset) readFile(ctx context.Context, call core.ToolCall) (core.ToolRe
 		if readFileFullResultFitsRegistryEnvelope(call.Name, result) {
 			return marshalToolResult(call, result)
 		}
+		// The outline is an enhancement only — if it is what pushed the
+		// result over the envelope limit, drop it rather than demote the
+		// read from full content to outline mode.
+		if _, ok := result["symbol_outline"]; ok {
+			delete(result, "symbol_outline")
+			if readFileFullResultFitsRegistryEnvelope(call.Name, result) {
+				return marshalToolResult(call, result)
+			}
+		}
 	}
 
 	if !explicitRange {

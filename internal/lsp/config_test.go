@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -421,6 +422,78 @@ func TestLoadLSPConfig_MalformedJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parse lsp config") {
 		t.Fatalf("expected parse error, got: %v", err)
+	}
+}
+
+func TestRegisterServerRollsBackClaimsOnConflict(t *testing.T) {
+	cfg := NewLSPConfig()
+	if err := cfg.RegisterServer("a", &ServerConfig{
+		Command:             "a-lsp",
+		ExtensionToLanguage: map[string]string{".a": "a"},
+	}); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	// Map iteration order is random; repeat so the conflicting extension is
+	// regularly not the first one visited.
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("b%d", i)
+		err := cfg.RegisterServer(name, &ServerConfig{
+			Command: "b-lsp",
+			ExtensionToLanguage: map[string]string{
+				".b1": "b", ".b2": "b", ".b3": "b", ".a": "b",
+			},
+		})
+		if err == nil {
+			t.Fatal("expected conflict error for .a")
+		}
+		if _, ok := cfg.Servers[name]; ok {
+			t.Fatalf("rejected server %q must not be registered", name)
+		}
+		for _, ext := range []string{".b1", ".b2", ".b3"} {
+			if owner, ok := cfg.claimed[ext]; ok {
+				t.Fatalf("extension %s left dangling, claimed by %q after failed registration", ext, owner)
+			}
+		}
+	}
+}
+
+func TestLoadLSPConfigRestoresDefaultAfterConflictingOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lsp.json")
+	// User overrides "go" but also claims .rs, which conflicts with the
+	// default rust server. The override must be rejected and the default go
+	// server fully restored.
+	cfgJSON := `{"servers": {"go": {"command": "my-gopls", "extensionToLanguage": {".go": "go", ".rs": "rust"}}}}`
+	if err := os.WriteFile(path, []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadLSPConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	srv, name, ok := cfg.ForExtension(".go")
+	if !ok || name != "go" {
+		t.Fatalf("ForExtension(.go) = (%v, %q, %v), want restored default go server", srv, name, ok)
+	}
+	if srv == nil || srv.Command != "gopls" {
+		t.Fatalf("expected restored default gopls, got %+v", srv)
+	}
+	if rustSrv, _, ok := cfg.ForExtension(".rs"); !ok || rustSrv == nil || rustSrv.Command != "rust-analyzer" {
+		t.Fatalf("default rust server must be untouched, got %+v ok=%v", rustSrv, ok)
+	}
+}
+
+func TestDefaultPythonServerUsesLangserverBinary(t *testing.T) {
+	cfg := NewLSPConfig()
+	loadDefaults(cfg)
+	srv, ok := cfg.Servers["python"]
+	if !ok {
+		t.Fatal("expected default python server")
+	}
+	// The `pyright` bin from the pyright npm package is the type-check CLI;
+	// the LSP server binary is `pyright-langserver`.
+	if srv.Command != "pyright-langserver" {
+		t.Fatalf("default python command = %q, want %q", srv.Command, "pyright-langserver")
 	}
 }
 

@@ -30,7 +30,7 @@ Whale 内置了 10 种常用语言的默认配置。**无需任何配置文件**
 |---|---|---|---|
 | **Go** | `gopls` | `.go` | `go install golang.org/x/tools/gopls@latest` |
 | **Rust** | `rust-analyzer` | `.rs` | `rustup component add rust-analyzer` |
-| **Python** | `pyright` | `.py`, `.pyi` | `npm install -g pyright` |
+| **Python** | `pyright-langserver` | `.py`, `.pyi` | `npm install -g pyright` |
 | **TypeScript** | `typescript-language-server` | `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` | `npm install -g typescript-language-server typescript` |
 | **C/C++** | `clangd` | `.c`, `.h`, `.cpp`, `.hpp`, `.cc`, `.cxx`, `.hxx` | [安装 clangd](https://clangd.llvm.org/installation.html) |
 | **HTML** | `vscode-html-language-server` | `.html`, `.htm` | `npm install -g vscode-langservers-extracted` |
@@ -98,7 +98,7 @@ Whale 按以下优先级查找 LSP 二进制文件：
       "install_help": "go install golang.org/x/tools/gopls@latest"
     },
     "python": {
-      "command": "pyright",
+      "command": "pyright-langserver",
       "args": ["--stdio"],
       "extensionToLanguage": {".py": "python", ".pyi": "python"},
       "install_help": "pip install pyright"

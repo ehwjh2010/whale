@@ -19,10 +19,15 @@ type ServerStatus struct {
 }
 
 type foundEntry struct {
-	path  string
-	args  []string
-	found bool
+	path      string
+	args      []string
+	found     bool
+	checkedAt time.Time
 }
+
+// notFoundRetryTTL bounds how long a negative discovery result is trusted,
+// so a server installed mid-session is eventually picked up.
+const notFoundRetryTTL = time.Minute
 
 // Manager coordinates the lifecycle of language servers. It is created via
 // NewManager(cfg, workspaceRoot) and registered with the toolset via
@@ -41,7 +46,15 @@ type Manager struct {
 	extCache      map[string]bool
 	foundCache    map[string]foundEntry
 	statusCache   map[string]ServerStatus
+	starting      map[string]chan struct{} // per-server in-flight start; closed when the attempt ends
+	closed        bool                     // set by Close; refuses further starts
 	scanning      atomic.Bool
+
+	// startCtx parents every server start; Close cancels it so in-flight
+	// handshakes abort promptly, and startWG lets Close wait them out.
+	startCtx    context.Context
+	startCancel context.CancelFunc
+	startWG     sync.WaitGroup
 }
 
 // NewManager creates a Manager with the given config and workspace root.
@@ -51,26 +64,50 @@ func NewManager(cfg *LSPConfig, workspaceRoot string) *Manager {
 		cfg = NewLSPConfig()
 		loadDefaults(cfg)
 	}
+	startCtx, startCancel := context.WithCancel(context.Background())
 	return &Manager{
 		config:        cfg,
 		workspaceRoot: workspaceRoot,
 		clients:       make(map[string]*Client),
 		foundCache:    make(map[string]foundEntry),
 		statusCache:   make(map[string]ServerStatus),
+		starting:      make(map[string]chan struct{}),
+		startCtx:      startCtx,
+		startCancel:   startCancel,
 	}
 }
 
-// Close shuts down all running language servers gracefully.
+// Close shuts down all running language servers gracefully. Servers are
+// closed concurrently and outside the manager lock (a stuck server would
+// otherwise serialize shutdown and block all other manager calls), and no
+// new server may start afterwards.
 func (m *Manager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var errs []string
-	for name, client := range m.clients {
-		if err := client.Close(); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
-		}
-	}
+	m.closed = true
+	clients := m.clients
 	m.clients = make(map[string]*Client)
+	m.mu.Unlock()
+
+	// Abort in-flight handshakes and wait for their goroutines to unwind —
+	// a start racing past Close would otherwise spawn an orphan process.
+	m.startCancel()
+	m.startWG.Wait()
+
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var errs []string
+	for name, client := range clients {
+		wg.Add(1)
+		go func(name string, client *Client) {
+			defer wg.Done()
+			if err := client.Close(); err != nil {
+				errMu.Lock()
+				errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+				errMu.Unlock()
+			}
+		}(name, client)
+	}
+	wg.Wait()
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %s", strings.Join(errs, "; "))
 	}
@@ -133,48 +170,67 @@ func (m *Manager) ClientForFileQuick(filePath string) (*Client, string, error) {
 		return nil, "", fmt.Errorf("no LSP server for %q files", ext)
 	}
 
-	// Fast path: already ready
+	// Fast path: already ready (triggers a background start otherwise).
 	client, _, ready := m.ReadyClientForFile(filePath)
 	if ready {
 		return client, name, nil
 	}
 
-	// Already starting from a previous attempt? Fail fast.
-	m.mu.RLock()
-	existing := m.clients[name]
-	m.mu.RUnlock()
-	if existing != nil && existing.isStarting() {
-		return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
-	}
+	// Wait for the in-flight start attempt to finish (its channel is
+	// closed however the attempt ends), bounded by a short deadline so
+	// slow cold starts return a retry hint instead of blocking the tool.
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		m.mu.RLock()
+		client = m.clients[name]
+		attempt := m.starting[name]
+		m.mu.RUnlock()
 
-	// Fresh start — wait briefly (ReadyClientForFile already triggered ensureAsync)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		client, _, ready = m.ReadyClientForFile(filePath)
-		if ready {
+		if client != nil && client.alive() {
 			return client, name, nil
 		}
+		if attempt == nil {
+			if client != nil && client.isStarting() {
+				// Started outside backgroundStart (e.g. clientForServer).
+				return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
+			}
+			// No attempt in flight and no live client: the start already
+			// finished and failed (or the server is not installed).
+			reason := ""
+			m.mu.RLock()
+			if st, ok := m.statusCache[name]; ok && st.Reason != "" {
+				reason = ": " + st.Reason
+			}
+			m.mu.RUnlock()
+			return nil, name, fmt.Errorf("language server %q failed to start%s; check lsp_status, or use grep + read_file in the meantime", name, reason)
+		}
+		select {
+		case <-attempt:
+			// Attempt finished; loop to observe the outcome.
+		case <-deadline.C:
+			return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
+		}
 	}
-	return nil, name, fmt.Errorf("language server %q is still starting up; retry in a few seconds, or use grep + read_file in the meantime", name)
 }
 
 // EnsureAllAsync triggers a background start for configured language servers
-// whose binary was found and that have matching workspace files (or when
-// Warmup hasn't run yet and the cache is empty). It returns immediately.
+// whose binary was found and that have matching workspace files. Before a
+// Warmup scan has produced data, every configured server is eligible. It
+// returns without waiting for the starts to finish.
 func (m *Manager) EnsureAllAsync() {
 	m.mu.RLock()
+	scanned := m.extCache != nil
 	fc := m.foundCache
 	m.mu.RUnlock()
 	for name, srv := range m.config.Servers {
-		// Skip if Warmup has run and found no matching workspace files.
-		if fc != nil {
-			if entry, ok := fc[name]; ok && !entry.found {
-				continue
-			}
-			if !m.hasWorkspaceFiles(srv) {
-				continue
-			}
+		if entry, ok := fc[name]; ok && !entry.found && time.Since(entry.checkedAt) < notFoundRetryTTL {
+			continue
+		}
+		// Only filter by workspace files once a scan has actually run;
+		// with no scan data the filter would reject everything.
+		if scanned && !m.hasWorkspaceFiles(srv) {
+			continue
 		}
 		m.ensureAsync(name)
 	}
@@ -187,13 +243,50 @@ func (m *Manager) ensureAsync(name string) {
 	if !ok {
 		return
 	}
-	m.mu.RLock()
-	client, ok := m.clients[name]
-	m.mu.RUnlock()
-	if ok && (client.alive() || client.isStarting()) {
-		return
+	// Claim synchronously so callers (and their waiters) observe the
+	// in-flight attempt immediately; only the slow work runs async.
+	if attempt, ok := m.tryClaimStart(name); ok {
+		go m.runStart(name, srv, attempt)
 	}
-	m.backgroundStart(name, srv)
+}
+
+// tryClaimStart registers an exclusive start attempt for name. It returns
+// false when the manager is closed, the server is already running or
+// starting, or another attempt is in flight. On success the caller must
+// invoke runStart with the returned channel.
+func (m *Manager) tryClaimStart(name string) (chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, false
+	}
+	if client, ok := m.clients[name]; ok && (client.alive() || client.isStarting()) {
+		return nil, false
+	}
+	if _, inFlight := m.starting[name]; inFlight {
+		return nil, false
+	}
+	attempt := make(chan struct{})
+	m.starting[name] = attempt
+	m.startWG.Add(1)
+	return attempt, true
+}
+
+// findServerCached memoizes FindServerForConfig results in foundCache.
+// Positive results are cached for the session; negative results are
+// re-checked after notFoundRetryTTL.
+func (m *Manager) findServerCached(name string, srv *ServerConfig) (string, []string, bool) {
+	m.mu.RLock()
+	entry, ok := m.foundCache[name]
+	m.mu.RUnlock()
+	if ok && (entry.found || time.Since(entry.checkedAt) < notFoundRetryTTL) {
+		return entry.path, entry.args, entry.found
+	}
+	path, args, found := FindServerForConfig(srv)
+	m.mu.Lock()
+	m.foundCache[name] = foundEntry{path: path, args: args, found: found, checkedAt: time.Now()}
+	m.mu.Unlock()
+	return path, args, found
 }
 
 // newClient creates a Client pre-populated with server config values.
@@ -203,7 +296,8 @@ func (m *Manager) newClient(name string, srv *ServerConfig, command string, args
 		command:               command,
 		args:                  args,
 		rootURI:               PathToURI(m.workspaceRoot),
-		openDocs:              make(map[string]time.Time),
+		openDocs:              make(map[string]openDocState),
+		languageByExt:         srv.ExtensionToLanguage,
 		env:                   srv.Env,
 		initializationOptions: srv.InitializationOptions,
 		settings:              srv.Settings,
@@ -241,27 +335,30 @@ func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Cl
 				time.Sleep(delay)
 			}
 			m.mu.Lock()
-			if m.clients[name] != client {
+			if m.closed || m.clients[name] != client {
 				m.mu.Unlock()
-				return // replaced by a newer client
+				return // manager closed or replaced by a newer client
 			}
 			m.mu.Unlock()
-			command, args, found := FindServerForConfig(srv)
+			command, args, found := m.findServerCached(name, srv)
 			if !found {
 				return
 			}
 			newClient := m.newClient(name, srv, command, args)
 			m.mu.Lock()
-			if m.clients[name] != client {
+			if m.closed || m.clients[name] != client {
 				m.mu.Unlock()
 				newClient.Close()
 				return
 			}
 			m.clients[name] = newClient
+			// Track the restart so Close cancels and waits it out.
+			m.startWG.Add(1)
 			m.mu.Unlock()
-			ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
+			ctx, cancel := context.WithTimeout(m.startCtx, srv.StartupTimeout())
 			err := newClient.Start(ctx)
 			cancel()
+			m.startWG.Done()
 			if err != nil {
 				totalRestarts++
 				m.setStatus(name, "failed", command, err.Error())
@@ -275,16 +372,26 @@ func (m *Manager) maybeMonitorRestart(name string, srv *ServerConfig, client *Cl
 }
 
 func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerConfig) (*Client, error) {
-	m.mu.RLock()
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("lsp manager is closed")
+	}
 	client, ok := m.clients[name]
-	m.mu.RUnlock()
+	// Track this synchronous start so Close waits it out and can cancel it,
+	// exactly like the backgroundStart path.
+	m.startWG.Add(1)
+	m.mu.Unlock()
+	defer m.startWG.Done()
+
 	if ok {
 		if !client.ready.Load() {
-			// Ensure enough time; caller ctx may be shorter than startup timeout
+			// Ensure enough time; caller ctx may be shorter than startup
+			// timeout. Parent on startCtx so Close aborts the handshake.
 			startCtx := ctx
 			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < srv.StartupTimeout() {
 				var cancel context.CancelFunc
-				startCtx, cancel = context.WithTimeout(context.Background(), srv.StartupTimeout())
+				startCtx, cancel = context.WithTimeout(m.startCtx, srv.StartupTimeout())
 				defer cancel()
 			}
 			if err := client.Start(startCtx); err != nil {
@@ -300,7 +407,7 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 		return client, nil
 	}
 
-	command, args, found := FindServerForConfig(srv)
+	command, args, found := m.findServerCached(name, srv)
 	if !found {
 		help := srv.InstallHelp
 		if help == "" {
@@ -311,10 +418,14 @@ func (m *Manager) clientForServer(ctx context.Context, name string, srv *ServerC
 	}
 
 	// Build the replacement before acquiring the write lock so that
-	// FindServerForConfig (which does I/O) does not extend the critical section.
+	// discovery I/O does not extend the critical section.
 	newClient := m.newClient(name, srv, command, args)
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("lsp manager is closed")
+	}
 	if existing, ok := m.clients[name]; ok {
 		if existing.alive() {
 			m.mu.Unlock()
@@ -394,10 +505,7 @@ func (m *Manager) Warmup() {
 		m.extCache = extCache
 		m.mu.Unlock()
 		for name, srv := range m.config.Servers {
-			path, args, found := FindServerForConfig(srv)
-			m.mu.Lock()
-			m.foundCache[name] = foundEntry{path: path, args: args, found: found}
-			m.mu.Unlock()
+			_, _, found := m.findServerCached(name, srv)
 			if found && m.hasWorkspaceFiles(srv) {
 				m.backgroundStart(name, srv)
 			}
@@ -405,31 +513,50 @@ func (m *Manager) Warmup() {
 	}()
 }
 
+// backgroundStart claims and synchronously runs one start attempt. Callers
+// that must not block use ensureAsync instead.
 func (m *Manager) backgroundStart(name string, srv *ServerConfig) {
-	m.mu.RLock()
-	client, ok := m.clients[name]
-	if ok && (client.alive() || client.isStarting()) {
-		m.mu.RUnlock()
+	attempt, ok := m.tryClaimStart(name)
+	if !ok {
 		return
 	}
-	m.mu.RUnlock()
+	m.runStart(name, srv, attempt)
+}
 
-	command, args, found := FindServerForConfig(srv)
+// runStart performs discovery and the server handshake for a claimed start
+// attempt. The attempt channel is closed when the attempt ends, however it
+// ends; waiters use it to observe the outcome.
+func (m *Manager) runStart(name string, srv *ServerConfig, attempt chan struct{}) {
+	defer func() {
+		m.mu.Lock()
+		delete(m.starting, name)
+		m.mu.Unlock()
+		close(attempt)
+		m.startWG.Done()
+	}()
+
+	command, args, found := m.findServerCached(name, srv)
 	if !found {
+		m.setStatus(name, "not_installed", "", srv.InstallHelp)
 		return
 	}
 
-	client = m.newClient(name, srv, command, args)
+	client := m.newClient(name, srv, command, args)
 
 	m.mu.Lock()
-	if existing, ok := m.clients[name]; ok && (existing.alive() || existing.isStarting()) {
+	if m.closed {
+		// Close ran while we were discovering; do not spawn.
 		m.mu.Unlock()
 		return
+	}
+	if dead, ok := m.clients[name]; ok {
+		// Reclaim the crashed predecessor's resources off the hot path.
+		go dead.Close()
 	}
 	m.clients[name] = client
 	m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), srv.StartupTimeout())
+	ctx, cancel := context.WithTimeout(m.startCtx, srv.StartupTimeout())
 	defer cancel()
 
 	if err := client.Start(ctx); err != nil {
@@ -450,8 +577,12 @@ func (m *Manager) SymbolOutline(ctx context.Context, filePath string) string {
 	if !ok {
 		return ""
 	}
+	// The outline only enriches read_file output; never let a slow or
+	// still-indexing server hold up a plain file read.
+	outlineCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	uri := PathToURI(filePath)
-	symbols, err := client.DocumentSymbols(ctx, uri)
+	symbols, err := client.DocumentSymbols(outlineCtx, uri)
 	if err != nil || len(symbols) == 0 {
 		return ""
 	}
@@ -557,7 +688,11 @@ func scanDir(dir string, depth int, result map[string]bool, fileCount *int, maxD
 		}
 		if e.IsDir() {
 			n := e.Name()
-			if n == ".git" || n == "node_modules" || n == "vendor" || strings.HasPrefix(n, ".") {
+			switch n {
+			case ".git", "node_modules", "vendor", "build", "dist", "target":
+				continue
+			}
+			if strings.HasPrefix(n, ".") {
 				continue
 			}
 			scanDir(filepath.Join(dir, n), depth+1, result, fileCount, maxDepth, maxFiles)
