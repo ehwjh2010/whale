@@ -69,6 +69,12 @@ func DefaultSlashCommands() []SlashCommandSpec {
 		{Name: "/workflows", Description: "Open workflow runs and progress", AutoRun: true},
 		{Name: "/deep-research", Description: "Run source-backed multi-agent web research", ArgumentHint: "[--resume runId] <question>"},
 		{Name: "/mcp", Description: "Show MCP server status", AutoRun: true},
+		{Name: "/lsp", Description: "Show or configure LSP code intelligence", ArgumentHint: "[status|on|off|sample]", AutoRun: true, Options: []SlashCommandOption{
+			{Token: "status", Description: "Show LSP status and server availability", AutoRun: true},
+			{Token: "on", Description: "Enable LSP code intelligence", AutoRun: true},
+			{Token: "off", Description: "Disable LSP code intelligence", AutoRun: true},
+			{Token: "sample", Description: "Write a default lsp.json server config", AutoRun: true},
+		}},
 		{Name: "/compact", Description: "Compact the current conversation", AutoRun: true},
 		{Name: "/init", Description: "Create AGENTS.md from repository context", AutoRun: true},
 		{Name: "/exit", Description: "Exit Whale", AutoRun: true},

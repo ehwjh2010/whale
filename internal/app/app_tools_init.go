@@ -43,14 +43,17 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	pluginTools := pluginOutcome.Tools
 	toolset.SetExtraSkills(pluginOutcome.Skills)
 	var lspMgr *lsp.Manager
-	lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
-	lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "whale: lsp: failed to load config from %s: %v (LSP disabled)\n", lspConfigPath, err)
-	} else if len(lspCfg.Servers) > 0 {
-		lspMgr = lsp.NewManager(lspCfg, workspaceRoot)
-		toolset.SetLSPManager(lspMgr)
-		lspMgr.Warmup()
+	// LSP is off by default; enable via /lsp on or [lsp] enabled = true.
+	if cfg.LSPEnabled {
+		lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
+		lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "whale: lsp: failed to load config from %s: %v (LSP disabled)\n", lspConfigPath, err)
+		} else if len(lspCfg.Servers) > 0 {
+			lspMgr = lsp.NewManager(lspCfg, workspaceRoot)
+			toolset.SetLSPManager(lspMgr)
+			lspMgr.Warmup()
+		}
 	}
 	baseTools := append([]core.Tool{}, toolset.Tools()...)
 	baseToolRegistry, err := core.NewToolRegistryChecked(baseTools)

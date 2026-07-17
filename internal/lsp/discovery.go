@@ -112,8 +112,11 @@ func isRustupProxy(path string) bool {
 	if !strings.HasPrefix(strings.ToLower(path), strings.ToLower(cargoBin)) {
 		return false
 	}
-	// Run --version to verify it's a real binary, not a proxy shim
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run --version to verify it's a real binary, not a proxy shim. A proxy
+	// fails within milliseconds; the generous timeout only guards against a
+	// hung binary, so a slow cold start (AV scan of a fresh 20MB file) is
+	// not misclassified as a proxy.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
 	return cmd.Run() != nil

@@ -192,7 +192,10 @@ func TestStartFailureReleasesConcurrentWaiter(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected loser Start to fail")
 	}
-	if elapsed > 3*time.Second {
+	// The essential claim: the loser is released when the winner fails,
+	// rather than sitting out the full 10s startupTimeout. The margin
+	// tolerates slow process spawn under load (AV scans, parallel tests).
+	if elapsed > 6*time.Second {
 		t.Fatalf("loser waited %v; must be released when the winner fails", elapsed)
 	}
 	if werr := <-winnerErr; werr == nil {

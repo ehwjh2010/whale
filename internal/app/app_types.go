@@ -55,6 +55,8 @@ type Config struct {
 	APIBaseURL                     string
 	SkillsDisabled                 []string
 	Plugins                        plugins.ConfigMap
+	LSPEnabled                     bool
+	LSPEnabledExplicit             bool
 	WorkflowsEnabled               bool
 	WorkflowsEnabledExplicit       bool
 	WorkflowKeywordTrigger         bool

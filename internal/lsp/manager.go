@@ -203,7 +203,7 @@ func (m *Manager) ClientForFileQuick(filePath string) (*Client, string, error) {
 				reason = ": " + st.Reason
 			}
 			m.mu.RUnlock()
-			return nil, name, fmt.Errorf("language server %q failed to start%s; check lsp_status, or use grep + read_file in the meantime", name, reason)
+			return nil, name, fmt.Errorf("language server %q failed to start%s; check /lsp, or use grep + read_file in the meantime", name, reason)
 		}
 		select {
 		case <-attempt:

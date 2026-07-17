@@ -138,6 +138,10 @@ func ApplyFileConfig(cfg *Config, file FileConfig) error {
 		cfg.WorkflowsEnabled = *file.Workflows.Enabled
 		cfg.WorkflowsEnabledExplicit = true
 	}
+	if file.Lsp.Enabled != nil {
+		cfg.LSPEnabled = *file.Lsp.Enabled
+		cfg.LSPEnabledExplicit = true
+	}
 	if file.Workflows.KeywordTriggerEnabled != nil {
 		cfg.WorkflowKeywordTrigger = *file.Workflows.KeywordTriggerEnabled
 		cfg.WorkflowKeywordTriggerExplicit = true
@@ -265,6 +269,10 @@ func overlayExplicitConfig(dst *Config, src Config) {
 	if src.WorkflowsEnabledExplicit || (src.configDefaulted && src.WorkflowsEnabled != def.WorkflowsEnabled) {
 		dst.WorkflowsEnabled = src.WorkflowsEnabled
 		dst.WorkflowsEnabledExplicit = src.WorkflowsEnabledExplicit || (src.configDefaulted && src.WorkflowsEnabled != def.WorkflowsEnabled)
+	}
+	if src.LSPEnabledExplicit || (src.configDefaulted && src.LSPEnabled != def.LSPEnabled) {
+		dst.LSPEnabled = src.LSPEnabled
+		dst.LSPEnabledExplicit = src.LSPEnabledExplicit || (src.configDefaulted && src.LSPEnabled != def.LSPEnabled)
 	}
 	if src.WorkflowKeywordTriggerExplicit || (src.configDefaulted && src.WorkflowKeywordTrigger != def.WorkflowKeywordTrigger) {
 		dst.WorkflowKeywordTrigger = src.WorkflowKeywordTrigger
