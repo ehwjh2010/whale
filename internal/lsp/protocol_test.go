@@ -131,6 +131,9 @@ func TestHoverContents_UnmarshalJSON_Null(t *testing.T) {
 }
 
 func TestPathToURI_Windows(t *testing.T) {
+	if !isWindows() {
+		t.Skip("Windows path test on non-Windows")
+	}
 	uri := PathToURI(`C:\Users\test\main.go`)
 	want := "file:///C:/Users/test/main.go"
 	if uri != want {
@@ -155,6 +158,9 @@ func TestPathToURI_Relative(t *testing.T) {
 }
 
 func TestURIToPath_Windows(t *testing.T) {
+	if !isWindows() {
+		t.Skip("Windows path test on non-Windows")
+	}
 	path := URIToPath("file:///C:/Users/test/main.go")
 	want := `C:\Users\test\main.go`
 	if !strings.EqualFold(path, want) {

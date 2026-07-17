@@ -425,9 +425,11 @@ func TestLoadLSPConfig_MalformedJSON(t *testing.T) {
 }
 
 func TestLoadLSPConfig_FileError(t *testing.T) {
-	_, err := LoadLSPConfig(`\invalid|\path\`)
+	// A directory fails os.ReadFile with a non-IsNotExist error on all
+	// platforms (a missing file would just yield the default config).
+	_, err := LoadLSPConfig(t.TempDir())
 	if err == nil {
-		t.Fatal("expected error for invalid path")
+		t.Fatal("expected error for unreadable path")
 	}
 }
 

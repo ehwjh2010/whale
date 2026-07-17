@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,7 +80,8 @@ func TestFindServerForConfig_KnownInstallDir(t *testing.T) {
 		exeName += ".exe"
 	}
 	exePath := filepath.Join(dir, exeName)
-	if err := os.WriteFile(exePath, []byte("dummy"), 0644); err != nil {
+	// 0o755: exec.LookPath on Unix only matches files with the execute bit.
+	if err := os.WriteFile(exePath, []byte("dummy"), 0o755); err != nil {
 		t.Fatalf("create dummy exe: %v", err)
 	}
 
@@ -284,6 +286,11 @@ func TestIsRustupProxy_ValidBinary(t *testing.T) {
 	})
 	if !found {
 		t.Skip("rust-analyzer not found on this system")
+	}
+	// On CI runners ~/.cargo/bin/rust-analyzer is often a rustup proxy
+	// stub whose --version fails; only a working binary must pass.
+	if exec.Command(path, "--version").Run() != nil {
+		t.Skip("rust-analyzer on this system is a rustup proxy stub")
 	}
 	if isRustupProxy(path) {
 		t.Fatalf("working rust-analyzer at %s should not be flagged as proxy", path)
