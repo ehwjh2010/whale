@@ -79,9 +79,11 @@ func knownInstallDirs() []string {
 				filepath.Join(home, ".cargo", "bin"),
 				filepath.Join(home, "AppData", "Roaming", "npm"),
 				filepath.Join(home, "AppData", "Local", "Programs", "LLVM", "bin"),
-				clangdInstallDir(home),
 				"C:\\Program Files\\LLVM\\bin",
 			)
+			if cd := clangdInstallDir(home); cd != "" {
+				dirs = append(dirs, cd)
+			}
 		} else {
 			dirs = append(dirs,
 				filepath.Join(home, "go", "bin"),
