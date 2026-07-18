@@ -82,6 +82,7 @@ func New(ctx context.Context, cfg Config, start StartOptions) (*App, error) {
 		thinkingEnabled:       runtimeInit.thinking,
 		contextWindow:         runtimeInit.contextWindow,
 		mcpManager:            toolInit.mcpManager,
+		lspManager:            toolInit.lspManager,
 		pluginManager:         toolInit.pluginManager,
 		pluginTools:           append([]core.Tool{}, toolInit.pluginTools...),
 		pluginAgents:          append([]plugins.AgentDefinition{}, toolInit.pluginAgents...),

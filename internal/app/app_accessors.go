@@ -164,10 +164,21 @@ func (a *App) Close() error {
 		return nil
 	}
 	a.resetAgent()
-	if a.mcpManager == nil {
-		return nil
+	var errs []string
+	if a.lspManager != nil {
+		if err := a.lspManager.Close(); err != nil {
+			errs = append(errs, "lsp: "+err.Error())
+		}
 	}
-	return a.mcpManager.Close()
+	if a.mcpManager != nil {
+		if err := a.mcpManager.Close(); err != nil {
+			errs = append(errs, "mcp: "+err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func (a *App) resetAgent() {

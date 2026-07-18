@@ -12,23 +12,27 @@ import (
 	"time"
 
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/lsp"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/skills"
 	"github.com/usewhale/whale/internal/webfetch"
 )
 
+type SymbolOutlineProvider interface {
+	SymbolOutline(ctx context.Context, filePath string) string
+}
+
 type Toolset struct {
-	root              string
-	worktreeRoot      string
-	originalWorkspace string
-	httpClient        *http.Client
-	webFetchClient    *webfetch.Client
-	ddgSearchURL      string
-	bingSearchURL     string
-	tasks             *shellTaskRegistry
-	fileLocks         *fileMutationLocks
-	fileStates        *fileStateCache
-	// Test hooks for deterministic mutation-race coverage.
+	root                string
+	worktreeRoot        string
+	originalWorkspace   string
+	httpClient          *http.Client
+	webFetchClient      *webfetch.Client
+	ddgSearchURL        string
+	bingSearchURL       string
+	tasks               *shellTaskRegistry
+	fileLocks           *fileMutationLocks
+	fileStates          *fileStateCache
 	afterFileRead       func(string)
 	beforeFileCommit    func(string)
 	skillDisabled       []string
@@ -37,10 +41,12 @@ type Toolset struct {
 	execApproval        policy.ApprovalFunc
 	sessionIDFunc       func() string
 	foregroundShellWait foregroundShellWaitConfig
-	// Deferred tool search (MCP)
-	deferredCatalog  DeferredToolCatalog
-	deferredPromote  DeferredToolPromoter
-	deferredRenderer DeferredToolRenderer
+	symbolOutline       SymbolOutlineProvider
+	lspManager          *lsp.Manager
+	lspOverride         lspToolProvider
+	deferredCatalog     DeferredToolCatalog
+	deferredPromote     DeferredToolPromoter
+	deferredRenderer    DeferredToolRenderer
 }
 
 type externalReadRootsKey struct{}
@@ -157,6 +163,20 @@ func (b *Toolset) SetSkillDisabled(names []string) {
 
 func (b *Toolset) SetExtraSkills(extra []*skills.Skill) {
 	b.extraSkills = append([]*skills.Skill(nil), extra...)
+}
+
+func (b *Toolset) SetSymbolOutlineProvider(p SymbolOutlineProvider) {
+	b.symbolOutline = p
+}
+
+func (b *Toolset) SetLSPManager(m *lsp.Manager) {
+	b.lspManager = m
+	if m != nil {
+		b.lspOverride = &managerProvider{m: m}
+		b.symbolOutline = m
+	} else {
+		b.lspOverride = nil
+	}
 }
 
 func (b *Toolset) SetWorktreeContext(worktreeRoot, originalWorkspace string) {

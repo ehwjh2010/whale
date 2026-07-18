@@ -2,8 +2,11 @@ package app
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/lsp"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
@@ -39,6 +42,19 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	mcpManager := whalemcp.NewManager(mcpConfig, workspaceRoot)
 	pluginTools := pluginOutcome.Tools
 	toolset.SetExtraSkills(pluginOutcome.Skills)
+	var lspMgr *lsp.Manager
+	// LSP is off by default; enable via /lsp on or [lsp] enabled = true.
+	if cfg.LSPEnabled {
+		lspConfigPath := lsp.DefaultConfigPath(cfg.DataDir)
+		lspCfg, err := lsp.LoadLSPConfig(lspConfigPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "whale: lsp: failed to load config from %s: %v (LSP disabled)\n", lspConfigPath, err)
+		} else if len(lspCfg.Servers) > 0 {
+			lspMgr = lsp.NewManager(lspCfg, workspaceRoot)
+			toolset.SetLSPManager(lspMgr)
+			lspMgr.Warmup()
+		}
+	}
 	baseTools := append([]core.Tool{}, toolset.Tools()...)
 	baseToolRegistry, err := core.NewToolRegistryChecked(baseTools)
 	if err != nil {
@@ -65,6 +81,7 @@ func initAppTools(cfg Config, start StartOptions, workspaceRoot string) (appTool
 	return appToolInit{
 		toolset:              toolset,
 		mcpManager:           mcpManager,
+		lspManager:           lspMgr,
 		pluginManager:        pluginManager,
 		pluginTools:          pluginTools,
 		pluginAgents:         pluginOutcome.Agents,

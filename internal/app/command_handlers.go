@@ -164,6 +164,9 @@ func (a *App) ExecuteLocalCommand(line string) (CommandExecution, error) {
 		mcp := a.buildMCPLocalResult()
 		return CommandExecution{Handled: true, Text: mcp.PlainText, LocalResult: mcp}, nil
 	}
+	if trimmed == "/lsp" || strings.HasPrefix(trimmed, "/lsp ") {
+		return a.executeLSPCommand(trimmed)
+	}
 	if trimmed == "/workflows" || strings.HasPrefix(trimmed, "/workflows ") {
 		fields := strings.Fields(trimmed)
 		if len(fields) != 1 {

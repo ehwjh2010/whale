@@ -32,6 +32,7 @@ func DefaultConfig() Config {
 		RetryMaxDelay:                llmretry.DefaultPolicy().MaxDelay,
 		ShellForegroundWaitDefaultMS: tools.DefaultForegroundShellWait(),
 		ShellForegroundWaitMaxMS:     tools.MaxForegroundShellWait(),
+		LSPEnabled:                   false,
 		WorkflowsEnabled:             false,
 		WorkflowKeywordTrigger:       true,
 		configDefaulted:              true,
