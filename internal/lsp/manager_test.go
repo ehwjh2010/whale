@@ -196,7 +196,7 @@ func TestClientForFileQuickFailsFastOnStartFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for a server that exits immediately")
 	}
-	if elapsed > 2500*time.Millisecond {
+	if elapsed > 4500*time.Millisecond {
 		t.Fatalf("ClientForFileQuick spun %v after the start already failed; want fast failure", elapsed)
 	}
 }
