@@ -30,22 +30,19 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 		Short: "Run a single prompt non-interactively",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := prepareWorktree(cmd, opts); err != nil {
+			err := runExecE(cmd, opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
+			if err == nil || !jsonOutput {
 				return err
 			}
-			if err := prepareCLIConfig(cmd, opts); err != nil {
+			if _, ok := err.(ExitError); ok {
 				return err
 			}
-			if flagChanged(cmd, "mode") {
-				trimmed := strings.TrimSpace(mode)
-				if trimmed == "" {
-					return &app.InvalidModeError{Value: mode}
-				}
-				if _, err := session.ParseMode(mode); err != nil {
-					return &app.InvalidModeError{Value: mode}
-				}
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			if err := writeExecErrorJSON(cmd.OutOrStdout(), err); err != nil {
+				return err
 			}
-			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
+			return ExitError{Code: 1}
 		},
 	}
 	c.Flags().BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON output")
@@ -225,6 +222,32 @@ func doctorBadge(level app.DoctorLevel) string {
 	default:
 		return "fail"
 	}
+}
+
+func runExecE(cmd *cobra.Command, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {
+	if err := prepareWorktree(cmd, opts); err != nil {
+		return err
+	}
+	if err := prepareCLIConfig(cmd, opts); err != nil {
+		return err
+	}
+	if flagChanged(cmd, "mode") {
+		trimmed := strings.TrimSpace(mode)
+		if trimmed == "" {
+			return &app.InvalidModeError{Value: mode}
+		}
+		if _, err := session.ParseMode(mode); err != nil {
+			return &app.InvalidModeError{Value: mode}
+		}
+	}
+	return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
+}
+
+func writeExecErrorJSON(out io.Writer, err error) error {
+	res := app.ExecResult{Status: "error", Error: err.Error()}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(res)
 }
 
 func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {

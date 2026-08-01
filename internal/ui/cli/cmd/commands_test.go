@@ -670,10 +670,7 @@ func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	for _, m := range []string{"wat", "   ", ""} {
-		if m == "" {
-			continue
-		}
+	for _, m := range []string{"wat", "   "} {
 		dir := t.TempDir()
 		workspace := t.TempDir()
 		oldwd, err := os.Getwd()
@@ -703,6 +700,90 @@ func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
 	defer mu.Unlock()
 	if requests != 0 {
 		t.Fatalf("expected zero provider requests for invalid mode, got %d", requests)
+	}
+}
+
+func TestExecJSONErrorOutputOnce(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "never reached")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--json", "--session", "missing", "hi"})
+	err = root.Execute()
+	if err == nil {
+		t.Fatal("expected rejected resume to fail")
+	}
+	code, ok := ExitCode(err)
+	if !ok || code != 1 {
+		t.Fatalf("expected ExitError{Code:1}, got %v", err)
+	}
+	raw := out.String()
+	if n := strings.Count(raw, "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON error result, got %d objects:\n%s", n, raw)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json error: %v\n%s", err, raw)
+	}
+	if res.Status != "error" || res.Error == "" {
+		t.Fatalf("expected status=error with message, got %+v", res)
+	}
+}
+
+func TestExecJSONErrorNotDoubleEmittedOnRunFailure(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--json", "hi"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("successful exec should not error: %v", err)
+	}
+	if n := strings.Count(out.String(), "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON result, got %d objects:\n%s", n, out.String())
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.Status != "completed" || res.SessionID == "" {
+		t.Fatalf("expected completed result with session id, got %+v", res)
 	}
 }
 
