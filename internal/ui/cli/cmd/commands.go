@@ -16,6 +16,7 @@ import (
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/attachments"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/session"
 )
 
 func newExecCmd(opts *cliOptions) *cobra.Command {
@@ -23,6 +24,7 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 	var timeoutSec int
 	var attachPaths []string
 	var sessionID string
+	var mode string
 	c := &cobra.Command{
 		Use:   "exec [prompt]",
 		Short: "Run a single prompt non-interactively",
@@ -34,13 +36,23 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 			if err := prepareCLIConfig(cmd, opts); err != nil {
 				return err
 			}
-			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID)
+			if flagChanged(cmd, "mode") {
+				trimmed := strings.TrimSpace(mode)
+				if trimmed == "" {
+					return &app.InvalidModeError{Value: mode}
+				}
+				if _, err := session.ParseMode(mode); err != nil {
+					return &app.InvalidModeError{Value: mode}
+				}
+			}
+			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
 		},
 	}
 	c.Flags().BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON output")
 	c.Flags().IntVar(&timeoutSec, "timeout-sec", 0, "Optional timeout in seconds for this exec run")
 	c.Flags().StringArrayVar(&attachPaths, "attach", nil, "Attach a local file to the prompt")
 	c.Flags().StringVar(&sessionID, "session", "", "Resume an existing session by id")
+	c.Flags().StringVar(&mode, "mode", "", "Run in a specific mode (agent|ask|plan)")
 	return c
 }
 
@@ -215,14 +227,14 @@ func doctorBadge(level app.DoctorLevel) string {
 	}
 }
 
-func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID string) error {
+func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {
 	prompt, err := readExecPrompt(in, args)
 	if err != nil {
 		return err
 	}
-	start := app.StartOptions{NewSession: true, Worktree: opts.worktreeSession}
+	start := app.StartOptions{NewSession: true, Worktree: opts.worktreeSession, ModeOverride: mode}
 	if sid := strings.TrimSpace(sessionID); sid != "" {
-		start = app.StartOptions{SessionID: sid, Worktree: opts.worktreeSession}
+		start = app.StartOptions{SessionID: sid, Worktree: opts.worktreeSession, ModeOverride: mode}
 		currentWorkspace, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("get workspace: %w", err)

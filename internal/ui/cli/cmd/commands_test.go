@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -655,6 +656,121 @@ func TestReadExecPromptPrefersArg(t *testing.T) {
 	}
 }
 
+func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	for _, m := range []string{"wat", "   ", ""} {
+		if m == "" {
+			continue
+		}
+		dir := t.TempDir()
+		workspace := t.TempDir()
+		oldwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd: %v", err)
+		}
+		if err := os.Chdir(workspace); err != nil {
+			t.Fatalf("Chdir: %v", err)
+		}
+
+		opts := &cliOptions{cfg: app.DefaultConfig()}
+		opts.cfg.DataDir = dir
+		root := newRootCmd(opts)
+		root.SetArgs([]string{"exec", "--mode", m, "hi"})
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		err = root.Execute()
+		_ = os.Chdir(oldwd)
+		if err == nil {
+			t.Fatalf("expected invalid mode %q to fail", m)
+		}
+		if !app.IsInvalidModeError(err) {
+			t.Fatalf("expected InvalidModeError for %q, got %T: %v", m, err, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("expected zero provider requests for invalid mode, got %d", requests)
+	}
+}
+
+func TestExecRunEAcceptsExplicitValidMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetArgs([]string{"exec", "--mode", "ASK", "hi"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("exec with ASK should succeed: %v", err)
+	}
+}
+
+func TestExecModeFlagValidation(t *testing.T) {
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	execCmd, _, err := newRootCmd(opts).Find([]string{"exec"})
+	if err != nil {
+		t.Fatalf("find exec: %v", err)
+	}
+
+	t.Run("valid modes accepted case-insensitively", func(t *testing.T) {
+		for _, m := range []string{"agent", "ASK", "Plan"} {
+			execCmd.Flags().Set("mode", m)
+			if !flagChanged(execCmd, "mode") {
+				t.Fatalf("mode flag not marked changed for %q", m)
+			}
+		}
+	})
+
+	t.Run("invalid mode rejected", func(t *testing.T) {
+		execCmd.Flags().Set("mode", "wat")
+		if !flagChanged(execCmd, "mode") {
+			t.Fatal("mode flag not marked changed")
+		}
+		if _, err := session.ParseMode("wat"); err == nil {
+			t.Fatal("expected ParseMode to reject invalid mode")
+		}
+	})
+
+	t.Run("blank explicit mode rejected", func(t *testing.T) {
+		if _, err := session.ParseMode("   "); err != nil {
+			t.Fatalf("ParseMode(blank) must keep Agent semantics: %v", err)
+		}
+		mode, err := session.ParseMode("")
+		if err != nil || mode != session.ModeAgent {
+			t.Fatalf("ParseMode(\"\") = %q, %v; want agent", mode, err)
+		}
+	})
+}
+
 func TestReadExecPromptFallsBackToStdin(t *testing.T) {
 	got, err := readExecPrompt(strings.NewReader("stdin prompt\n"), nil)
 	if err != nil {
@@ -686,7 +802,7 @@ func TestRunExecTextOutput(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil, ""); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	if got := out.String(); got != "hello from exec\n" {
@@ -718,7 +834,7 @@ func TestRunExecJSONOutput(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil, ""); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var res app.ExecResult
@@ -766,7 +882,7 @@ func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("second round"), opts, nil, true, 0, nil, "s1"); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader("second round"), opts, nil, true, 0, nil, "s1", ""); err != nil {
 		t.Fatalf("runExec resume: %v", err)
 	}
 	var res app.ExecResult
@@ -815,7 +931,7 @@ func TestRunExecResumeUnknownSessionFails(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing"); err == nil {
+	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing", ""); err == nil {
 		t.Fatal("expected resume of unknown session to fail")
 	}
 	mu.Lock()
@@ -860,7 +976,7 @@ func TestRunExecResumeKeepsSavedMode(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1"); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1", ""); err != nil {
 		t.Fatalf("runExec resume: %v", err)
 	}
 	var res app.ExecResult
@@ -1044,7 +1160,7 @@ func TestRunExecAttachSendsOpenAICompatibleFilePart(t *testing.T) {
 		BaseURL: srv.URL,
 		Model:   "gpt-4o",
 	}
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}, ""); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var payload map[string]any

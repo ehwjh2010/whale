@@ -25,6 +25,22 @@ func IsResumeRejectedError(err error) bool {
 	return errors.As(err, &target)
 }
 
+type InvalidModeError struct {
+	Value string
+}
+
+func (e *InvalidModeError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("invalid mode: %q (supported: agent, ask, plan)", e.Value)
+}
+
+func IsInvalidModeError(err error) bool {
+	var target *InvalidModeError
+	return errors.As(err, &target)
+}
+
 func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace string) (WorktreeSession, error) {
 	if start.NewSession || strings.TrimSpace(start.SessionID) == "" {
 		return WorktreeSession{}, nil
