@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -787,7 +788,15 @@ func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
 
 func TestRunExecResumeUnknownSessionFails(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
-	srv := newExecTestServer(t, "never reached")
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
@@ -808,6 +817,14 @@ func TestRunExecResumeUnknownSessionFails(t *testing.T) {
 	opts.cfg.DataDir = dir
 	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing"); err == nil {
 		t.Fatal("expected resume of unknown session to fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("expected zero provider requests on rejected resume, got %d", requests)
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "sessions")); err == nil && len(entries) > 0 {
+		t.Fatalf("expected zero session state writes, found: %v", entries)
 	}
 }
 
@@ -862,13 +879,16 @@ func TestRunExecResumeKeepsSavedMode(t *testing.T) {
 	}
 }
 
-func TestEnterResumeWorktreeMismatchFails(t *testing.T) {
+func TestValidateResumeTargetWorktreeMismatch(t *testing.T) {
 	dataDir := t.TempDir()
 	sessionsDir := filepath.Join(dataDir, "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatalf("mkdir sessions: %v", err)
 	}
 	recorded := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
 	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{WorktreePath: recorded}); err != nil {
 		t.Fatalf("save meta: %v", err)
 	}
@@ -877,8 +897,106 @@ func TestEnterResumeWorktreeMismatchFails(t *testing.T) {
 		SessionID: "s1",
 		Worktree:  app.WorktreeSession{Path: t.TempDir()},
 	}
-	if err := enterResumeWorktree(app.Config{DataDir: dataDir}, start, t.TempDir()); err == nil {
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, start, t.TempDir())
+	if err == nil {
 		t.Fatal("expected explicit worktree mismatch to fail")
+	}
+	if !app.IsResumeRejectedError(err) {
+		t.Fatalf("expected ResumeRejectedError, got %T: %v", err, err)
+	}
+}
+
+func TestValidateResumeTargetRejectsExplicitWorktreeWithoutRecord(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	start := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, start, t.TempDir()); err == nil {
+		t.Fatal("expected explicit worktree without session record to fail")
+	}
+}
+
+func TestValidateResumeTargetMissingWorktreeAllowsFallback(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		WorktreePath:      missing,
+		OriginalWorkspace: "/tmp/original",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("missing worktree should allow fallback: %v", err)
+	}
+	if target.Path != "" {
+		t.Fatalf("expected empty target for missing worktree, got %+v", target)
+	}
+
+	withExplicit := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, withExplicit, t.TempDir()); err == nil {
+		t.Fatal("expected explicit worktree takeover of missing worktree session to fail")
+	}
+}
+
+func TestValidateResumeTargetRejectsCrossWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{Workspace: "/somewhere/else"}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected cross-workspace resume to be rejected")
+	}
+	if !app.IsCrossWorkspaceResumeError(err) {
+		t.Fatalf("expected CrossWorkspaceResumeError, got %T: %v", err, err)
+	}
+}
+
+func TestValidateResumeTargetRejectsSubagent(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "subagent-x.jsonl"), []byte(`{"SessionID":"subagent-x","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "subagent-x"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected subagent session to be rejected")
+	}
+	if !app.IsResumeRejectedError(err) {
+		t.Fatalf("expected ResumeRejectedError, got %T: %v", err, err)
 	}
 }
 

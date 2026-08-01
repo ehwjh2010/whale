@@ -227,8 +227,14 @@ func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, ar
 		if err != nil {
 			return fmt.Errorf("get workspace: %w", err)
 		}
-		if err := enterResumeWorktree(opts.cfg, start, currentWorkspace); err != nil {
+		target, err := app.ValidateResumeTarget(opts.cfg, start, currentWorkspace)
+		if err != nil {
 			return err
+		}
+		if target.Path != "" && target.Path != currentWorkspace {
+			if err := os.Chdir(target.Path); err != nil {
+				return fmt.Errorf("enter resume worktree: %w", err)
+			}
 		}
 		if err := app.CommitStartState(opts.cfg, start, currentWorkspace); err != nil {
 			return err
@@ -269,24 +275,6 @@ func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, ar
 			}
 		}
 		return ExitError{Code: 1}
-	}
-	return nil
-}
-
-func enterResumeWorktree(cfg app.Config, start app.StartOptions, currentWorkspace string) error {
-	decision, err := app.ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
-	if err != nil {
-		return err
-	}
-	if decision.MissingWorktree || decision.Session.Path == "" {
-		return nil
-	}
-	explicit := strings.TrimSpace(start.Worktree.Path)
-	if explicit != "" && explicit != decision.Session.Path {
-		return fmt.Errorf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)
-	}
-	if err := os.Chdir(decision.Session.Path); err != nil {
-		return fmt.Errorf("enter resume worktree: %w", err)
 	}
 	return nil
 }
