@@ -15,7 +15,6 @@ import (
 
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/attachments"
-	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/session"
 )
 
@@ -120,19 +119,17 @@ func prepareResumeWorktree(args []string, last bool, opts *cliOptions) error {
 	if err != nil {
 		return err
 	}
-	sess, err := app.ResolveResumeWorktree(opts.cfg, start, workspaceRoot)
+	decision, err := app.ResolveResumeWorktree(opts.cfg, start, workspaceRoot)
 	if err != nil {
 		return err
 	}
+	sess := decision.Session
 	if strings.TrimSpace(sess.Path) == "" {
 		return nil
 	}
-	targetWorkspace := sess.Path
-	if workspace := strings.TrimSpace(sess.Workspace); workspace != "" {
-		inside, err := core.PathInside(workspace, sess.Path)
-		if err == nil && inside {
-			targetWorkspace = workspace
-		}
+	targetWorkspace := decision.TargetWorkspace
+	if strings.TrimSpace(targetWorkspace) == "" {
+		targetWorkspace = sess.Path
 	}
 	if err := os.Chdir(targetWorkspace); err != nil {
 		return fmt.Errorf("enter resume worktree: %w", err)

@@ -159,7 +159,7 @@ func TestResolveResumeWorktreeReturnsSessionWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree: %v", err)
 	}
-	if got.Name != "feature" || got.Path != worktreePath || got.Branch != "worktree-feature" || got.OriginalWorkspace != "/tmp/original" {
+	if got.Session.Name != "feature" || got.Session.Path != worktreePath || got.Session.Branch != "worktree-feature" || got.Session.OriginalWorkspace != "/tmp/original" {
 		t.Fatalf("unexpected worktree session: %+v", got)
 	}
 }
@@ -185,7 +185,7 @@ func TestResolveResumeWorktreeClearsMissingPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree: %v", err)
 	}
-	if got.Path != "" {
+	if got.Session.Path != "" {
 		t.Fatalf("expected missing worktree to resume normally, got %+v", got)
 	}
 	meta, err := session.LoadSessionMeta(sessionsDir, "s1")
@@ -205,7 +205,7 @@ func TestResolveResumeWorktreeSkipsPicker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree picker: %v", err)
 	}
-	if got.Path != "" {
+	if got.Session.Path != "" {
 		t.Fatalf("picker should not resolve worktree, got %+v", got)
 	}
 }

@@ -50,13 +50,13 @@ func CheckResumeWorkspace(sessionsDir, sessionID, currentWorkspace string) (stri
 	return crossWorkspaceResumeMessage(workspace, sessionID), true, nil
 }
 
-func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace string) (WorktreeSession, error) {
+func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace string) (ResumeWorktreeDecision, error) {
 	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
 	if err != nil {
-		return WorktreeSession{}, err
+		return ResumeWorktreeDecision{}, err
 	}
 	if !decision.MissingWorktree {
-		return decision.Session, nil
+		return decision, nil
 	}
 	sessionID := strings.TrimSpace(start.SessionID)
 	if sessionID == "" {
@@ -64,13 +64,13 @@ func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace stri
 		var err error
 		sessionID, err = resolveInitialSessionID(sessionsDir)
 		if err != nil {
-			return WorktreeSession{}, fmt.Errorf("resolve session failed: %w", err)
+			return ResumeWorktreeDecision{}, fmt.Errorf("resolve session failed: %w", err)
 		}
 	}
 	if err := CommitMissingWorktreeCleanup(store.DefaultSessionsDir(cfg.DataDir), sessionID, currentWorkspace); err != nil {
-		return WorktreeSession{}, err
+		return ResumeWorktreeDecision{}, err
 	}
-	return WorktreeSession{}, nil
+	return ResumeWorktreeDecision{}, nil
 }
 
 type ResumeWorktreeDecision struct {
@@ -107,7 +107,7 @@ func ResolveResumeWorktreeDecision(cfg Config, start StartOptions, currentWorksp
 		}
 		return ResumeWorktreeDecision{}, fmt.Errorf("stat worktree: %w", err)
 	}
-	return ResumeWorktreeDecision{Session: WorktreeSession{
+	decision := ResumeWorktreeDecision{Session: WorktreeSession{
 		Name:               meta.WorktreeName,
 		Workspace:          meta.Workspace,
 		Path:               path,
@@ -115,7 +115,9 @@ func ResolveResumeWorktreeDecision(cfg Config, start StartOptions, currentWorksp
 		OriginalWorkspace:  meta.OriginalWorkspace,
 		OriginalBranch:     meta.OriginalBranch,
 		OriginalHeadCommit: meta.OriginalHeadCommit,
-	}}, nil
+	}}
+	decision.TargetWorkspace = resumeTargetWorkspace(decision.Session)
+	return decision, nil
 }
 
 func CommitMissingWorktreeCleanup(sessionsDir, sessionID, currentWorkspace string) error {
