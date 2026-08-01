@@ -944,6 +944,38 @@ func TestRunExecResumeUnknownSessionFails(t *testing.T) {
 	}
 }
 
+func TestRunExecPlanModeSingleRoundExits(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "here is the plan")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("plan this"), opts, nil, false, 0, nil, "", "plan"); err != nil {
+		t.Fatalf("runExec plan mode: %v", err)
+	}
+	if !strings.Contains(out.String(), "here is the plan") {
+		t.Fatalf("expected plan output, got %q", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
 func TestRunExecResumeSavesExplicitModeForNextRound(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := newExecTestServer(t, "ok")
