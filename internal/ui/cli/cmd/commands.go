@@ -16,6 +16,7 @@ import (
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/attachments"
 	"github.com/usewhale/whale/internal/session"
+	whaleworktree "github.com/usewhale/whale/internal/worktree"
 )
 
 func newExecCmd(opts *cliOptions) *cobra.Command {
@@ -34,6 +35,8 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 				return err
 			}
 			if _, ok := err.(ExitError); ok {
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
 				return err
 			}
 			cmd.SilenceUsage = true
@@ -233,12 +236,6 @@ func doctorBadge(level app.DoctorLevel) string {
 }
 
 func runExecE(cmd *cobra.Command, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {
-	if err := prepareWorktree(cmd, opts); err != nil {
-		return err
-	}
-	if err := prepareCLIConfig(cmd, opts); err != nil {
-		return err
-	}
 	if flagChanged(cmd, "mode") {
 		trimmed := strings.TrimSpace(mode)
 		if trimmed == "" {
@@ -247,6 +244,49 @@ func runExecE(cmd *cobra.Command, opts *cliOptions, args []string, jsonOutput bo
 		if _, err := session.ParseMode(mode); err != nil {
 			return &app.InvalidModeError{Value: mode}
 		}
+	}
+	currentWorkspace, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get workspace: %w", err)
+	}
+	// Read-only resume pre-validation before any side effect: the strict
+	// session contract, the cross-workspace gate, and the explicit-worktree
+	// match are all checked here, with the would-be worktree path resolved
+	// without creating a branch, worktree, or ignore-file change.
+	// prepareWorktree below creates an explicit worktree only after these
+	// checks have passed.
+	var target app.ResumeWorktreeDecision
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		start := app.StartOptions{SessionID: sid, ModeOverride: mode}
+		if worktreeFlagChanged(cmd) {
+			sess, err := whaleworktree.ResolveSession(currentWorkspace, opts.worktreeName)
+			if err != nil {
+				return err
+			}
+			start.Worktree = worktreeSessionFrom(sess)
+		}
+		target, err = app.ValidateResumeTarget(opts.cfg, start, currentWorkspace)
+		if err != nil {
+			return err
+		}
+	}
+	if err := prepareWorktree(cmd, opts); err != nil {
+		return err
+	}
+	// Enter the recorded workspace for a resumed worktree session. For an
+	// explicit --worktree, prepareWorktree already changed into the worktree;
+	// this additionally aligns the process directory with the recorded
+	// workspace before the project configuration is loaded, so the round runs
+	// with the config of the directory it actually executes in.
+	if now, err := os.Getwd(); err != nil {
+		return fmt.Errorf("get workspace: %w", err)
+	} else if target.TargetWorkspace != "" && target.TargetWorkspace != now {
+		if err := os.Chdir(target.TargetWorkspace); err != nil {
+			return fmt.Errorf("enter resume worktree: %w", err)
+		}
+	}
+	if err := prepareCLIConfig(cmd, opts); err != nil {
+		return err
 	}
 	return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
 }
@@ -278,6 +318,9 @@ func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, ar
 			if err := os.Chdir(target.TargetWorkspace); err != nil {
 				return fmt.Errorf("enter resume worktree: %w", err)
 			}
+		}
+		if strings.TrimSpace(start.Worktree.Path) == "" && target.Session.Path != "" {
+			start.Worktree = target.Session
 		}
 		if err := app.CommitStartState(opts.cfg, start, currentWorkspace, target); err != nil {
 			return err

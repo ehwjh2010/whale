@@ -68,6 +68,11 @@ func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace strin
 		if explicit != "" {
 			return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: fmt.Sprintf("session worktree is gone; explicit worktree %q cannot take over session ownership", explicit)}
 		}
+		if msg, blocked, err := checkMissingWorktreeResumeGate(sessionsDir, start.SessionID, currentWorkspace); err != nil {
+			return ResumeWorktreeDecision{}, err
+		} else if blocked {
+			return ResumeWorktreeDecision{}, &CrossWorkspaceResumeError{Message: msg}
+		}
 		return decision, nil
 	default:
 		if explicit != "" {
@@ -98,6 +103,24 @@ func checkResumeWorkspaceAt(sessionsDir, sessionID, workspace string) error {
 		return &CrossWorkspaceResumeError{Message: msg}
 	}
 	return nil
+}
+
+// checkMissingWorktreeResumeGate rejects resuming a session whose recorded
+// worktree is gone when CommitMissingWorktreeCleanup would rebind the session
+// to a workspace different from the caller's directory. Without this gate the
+// read-only validation would report success, the commit phase would rewrite
+// session metadata, and only then app.New would reject the run as
+// cross-workspace — mutating state despite the rejected invocation.
+func checkMissingWorktreeResumeGate(sessionsDir, sessionID, currentWorkspace string) (string, bool, error) {
+	meta, err := session.LoadSessionMeta(sessionsDir, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	effective := core.FirstNonEmpty(strings.TrimSpace(meta.OriginalWorkspace), currentWorkspace)
+	if sameWorkspace(effective, currentWorkspace) {
+		return "", false, nil
+	}
+	return crossWorkspaceResumeMessage(effective, sessionID), true, nil
 }
 
 func CommitStartState(cfg Config, start StartOptions, currentWorkspace string, decision ResumeWorktreeDecision) error {

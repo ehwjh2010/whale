@@ -758,6 +758,37 @@ func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
 	}
 }
 
+func TestExecInvalidModeDoesNotCreateWorktree(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	repo := newCLIGitRepo(t)
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = t.TempDir()
+	root := newRootCmd(opts)
+	root.SetArgs([]string{"exec", "--worktree=feature-x", "--mode", "bogus", "hi"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected invalid mode to fail")
+	} else if !app.IsInvalidModeError(err) {
+		t.Fatalf("expected InvalidModeError, got %T: %v", err, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".whale", "worktrees", "feature-x")); !os.IsNotExist(err) {
+		t.Fatalf("invalid mode must not create a worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".whale")); !os.IsNotExist(err) {
+		t.Fatalf("invalid mode must not create .whale directories: %v", err)
+	}
+}
+
 func TestExecJSONErrorOutputOnce(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := newExecTestServer(t, "never reached")
@@ -839,6 +870,51 @@ func TestExecJSONErrorNotDoubleEmittedOnRunFailure(t *testing.T) {
 	}
 	if res.Status != "completed" || res.SessionID == "" {
 		t.Fatalf("expected completed result with session id, got %+v", res)
+	}
+}
+
+func TestExecJSONRuntimeFailureDoesNotPolluteStderr(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	root.SetArgs([]string{"exec", "--json", "hi"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected runtime failure to fail exec")
+	}
+	if n := strings.Count(out.String(), "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON result, got %d objects:\n%s", n, out.String())
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.Status != "error" || res.Error == "" {
+		t.Fatalf("expected status=error with message, got %+v", res)
+	}
+	if got := errOut.String(); strings.Contains(got, "Error:") || strings.Contains(got, "Usage:") {
+		t.Fatalf("cobra must not pollute stderr after a JSON error result:\n%s", got)
 	}
 }
 
@@ -1084,6 +1160,82 @@ func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
 	content := string(raw)
 	if !strings.Contains(content, "first round") || !strings.Contains(content, "second round") {
 		t.Fatalf("expected both rounds appended to same jsonl, got:\n%s", content)
+	}
+}
+
+func TestRunExecResumeRestoresWorktreeContext(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	requests := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- payload
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", "resumed")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	subdir := filepath.Join(worktreePath, "packages", "api")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:          subdir,
+		Branch:             "worktree-feature",
+		WorktreeName:       "feature",
+		WorktreePath:       worktreePath,
+		WorktreeBranch:     "worktree-feature",
+		OriginalWorkspace:  "/tmp/original",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(subdir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dataDir
+	if err := runExec(&out, &errOut, strings.NewReader("resume round"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var payload map[string]any
+	select {
+	case payload = <-requests:
+	default:
+		t.Fatal("expected exec request payload")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if !strings.Contains(string(raw), "Current worktree root: "+worktreePath) {
+		t.Fatalf("resumed round lost the recorded worktree context; system prompt missing worktree root:\n%s", raw)
 	}
 }
 
@@ -1423,16 +1575,19 @@ func TestValidateResumeTargetMissingWorktreeAllowsFallback(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
+	originalWorkspace := t.TempDir()
 	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
 		WorktreePath:      missing,
-		OriginalWorkspace: "/tmp/original",
+		OriginalWorkspace: originalWorkspace,
 	}); err != nil {
 		t.Fatalf("save meta: %v", err)
 	}
 
-	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	// Resuming from the recorded original workspace is the fallback path:
+	// the session rebinds to this directory after cleanup.
+	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
 	if err != nil {
-		t.Fatalf("missing worktree should allow fallback: %v", err)
+		t.Fatalf("missing worktree should allow fallback from the original workspace: %v", err)
 	}
 	if target.Session.Path != "" || target.MissingWorktree == false {
 		t.Fatalf("expected missing-worktree decision, got %+v", target)
@@ -1442,8 +1597,52 @@ func TestValidateResumeTargetMissingWorktreeAllowsFallback(t *testing.T) {
 		SessionID: "s1",
 		Worktree:  app.WorktreeSession{Path: t.TempDir()},
 	}
-	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, withExplicit, t.TempDir()); err == nil {
+	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, withExplicit, originalWorkspace); err == nil {
 		t.Fatal("expected explicit worktree takeover of missing worktree session to fail")
+	}
+}
+
+func TestValidateResumeTargetMissingWorktreeCrossWorkspaceRejectedReadOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	meta := session.SessionMeta{
+		Workspace:          missing,
+		Branch:             "worktree-feature",
+		WorktreeName:       "feature",
+		WorktreePath:       missing,
+		WorktreeBranch:     "worktree-feature",
+		OriginalWorkspace:  "/somewhere/else",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", meta); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+	before, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load before meta: %v", err)
+	}
+
+	_, err = app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected missing-worktree cross-workspace resume to be rejected")
+	}
+	if !app.IsCrossWorkspaceResumeError(err) {
+		t.Fatalf("expected CrossWorkspaceResumeError, got %T: %v", err, err)
+	}
+	after, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if after != before {
+		t.Fatalf("rejected resume must not mutate session metadata:\nbefore: %+v\nafter:  %+v", before, after)
 	}
 }
 
