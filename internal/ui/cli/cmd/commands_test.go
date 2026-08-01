@@ -1311,6 +1311,9 @@ func TestValidateResumeTargetWorktreeSubdirWorkspace(t *testing.T) {
 	if decision.Session.Workspace != subdir {
 		t.Fatalf("decision workspace = %q, want subdir %q", decision.Session.Workspace, subdir)
 	}
+	if decision.TargetWorkspace != subdir {
+		t.Fatalf("decision target workspace = %q, want subdir %q", decision.TargetWorkspace, subdir)
+	}
 }
 
 func TestRunExecResumeKeepsSavedMode(t *testing.T) {

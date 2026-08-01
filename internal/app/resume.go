@@ -76,6 +76,7 @@ func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace stri
 type ResumeWorktreeDecision struct {
 	Session         WorktreeSession
 	MissingWorktree bool
+	TargetWorkspace string
 }
 
 func ResolveResumeWorktreeDecision(cfg Config, start StartOptions, currentWorkspace string) (ResumeWorktreeDecision, error) {

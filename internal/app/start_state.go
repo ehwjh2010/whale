@@ -60,7 +60,8 @@ func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace strin
 		if explicit != "" && explicit != decision.Session.Path {
 			return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: fmt.Sprintf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)}
 		}
-		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, resumeTargetWorkspace(decision.Session)); err != nil {
+		decision.TargetWorkspace = resumeTargetWorkspace(decision.Session)
+		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, decision.TargetWorkspace); err != nil {
 			return ResumeWorktreeDecision{}, err
 		}
 		return decision, nil

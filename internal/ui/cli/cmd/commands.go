@@ -277,14 +277,8 @@ func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, ar
 		if err != nil {
 			return err
 		}
-		chdirTo := target.Session.Path
-		if ws := strings.TrimSpace(target.Session.Workspace); ws != "" {
-			if inside, insideErr := core.PathInside(ws, target.Session.Path); insideErr == nil && inside {
-				chdirTo = ws
-			}
-		}
-		if chdirTo != "" && chdirTo != currentWorkspace {
-			if err := os.Chdir(chdirTo); err != nil {
+		if target.TargetWorkspace != "" && target.TargetWorkspace != currentWorkspace {
+			if err := os.Chdir(target.TargetWorkspace); err != nil {
 				return fmt.Errorf("enter resume worktree: %w", err)
 			}
 		}
