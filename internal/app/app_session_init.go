@@ -87,6 +87,9 @@ func initAppSession(cfg Config, start StartOptions, workspaceRoot string) (appSe
 
 func initialAppSessionID(sessionsDir string, start StartOptions) (string, error) {
 	if sid := strings.TrimSpace(start.SessionID); sid != "" {
+		if _, err := session.ResolveStrictSession(sessionsDir, sid); err != nil {
+			return "", err
+		}
 		return sid, nil
 	}
 	if start.NewSession || start.ResumeMenu {
