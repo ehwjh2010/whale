@@ -126,10 +126,7 @@ func initialAppMode(sessionsDir, sessionID string, start StartOptions) (session.
 		if err != nil {
 			return "", err
 		}
-		modeState.Mode = mode
-		if err := session.SaveModeState(sessionsDir, sessionID, mode); err != nil {
-			return "", fmt.Errorf("save mode state failed: %w", err)
-		}
+		return mode, nil
 	}
 	return modeState.Mode, nil
 }

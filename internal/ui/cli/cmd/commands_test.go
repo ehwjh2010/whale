@@ -944,6 +944,89 @@ func TestRunExecResumeUnknownSessionFails(t *testing.T) {
 	}
 }
 
+func TestRunExecResumeSavesExplicitModeForNextRound(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"first"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("plan this"), opts, nil, true, 0, nil, "s1", "plan"); err != nil {
+		t.Fatalf("runExec with explicit mode: %v", err)
+	}
+	st, err := session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("explicit mode not persisted for next round, got %q", st.Mode)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec without mode: %v", err)
+	}
+	st, err = session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode after next round: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("saved mode not carried to next round, got %q", st.Mode)
+	}
+}
+
+func TestRunExecRejectedResumeDoesNotSaveMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "never reached")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing", "plan"); err == nil {
+		t.Fatal("expected rejected resume to fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sessions", "missing.state.json")); err == nil {
+		t.Fatal("explicit mode must not be saved when pre-checks fail")
+	}
+}
+
 func TestRunExecResumeKeepsSavedMode(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := newExecTestServer(t, "ok")

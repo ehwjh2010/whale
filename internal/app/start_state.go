@@ -82,12 +82,24 @@ func CommitStartState(cfg Config, start StartOptions, currentWorkspace string) e
 	if start.NewSession || strings.TrimSpace(start.SessionID) == "" {
 		return nil
 	}
+	sessionID := strings.TrimSpace(start.SessionID)
 	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
 	if err != nil {
 		return err
 	}
 	if decision.MissingWorktree {
-		return CommitMissingWorktreeCleanup(store.DefaultSessionsDir(cfg.DataDir), strings.TrimSpace(start.SessionID), currentWorkspace)
+		if err := CommitMissingWorktreeCleanup(store.DefaultSessionsDir(cfg.DataDir), sessionID, currentWorkspace); err != nil {
+			return err
+		}
+	}
+	if raw := strings.TrimSpace(start.ModeOverride); raw != "" {
+		mode, err := session.ParseMode(raw)
+		if err != nil {
+			return &InvalidModeError{Value: raw}
+		}
+		if err := session.SaveModeState(store.DefaultSessionsDir(cfg.DataDir), sessionID, mode); err != nil {
+			return fmt.Errorf("save mode state failed: %w", err)
+		}
 	}
 	return nil
 }
