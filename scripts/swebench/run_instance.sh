@@ -202,6 +202,11 @@ else
 fi
 
 echo "[swebench] running whale in $CHECKOUT_DIR"
+# The strict session gate requires the session file to exist before exec can
+# resume it. Seed an empty session file so the first round of a fresh run id
+# passes the gate; exec then appends the round to the same session.
+mkdir -p "$WHALE_DATA_DIR/sessions"
+: >"$WHALE_DATA_DIR/sessions/$RUN_ID.jsonl"
 (
   cd "$CHECKOUT_DIR"
   DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \

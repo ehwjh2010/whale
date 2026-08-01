@@ -49,11 +49,6 @@ func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace strin
 	if _, err := session.ResolveStrictSession(sessionsDir, start.SessionID); err != nil {
 		return WorktreeSession{}, &ResumeRejectedError{Reason: err.Error()}
 	}
-	if msg, blocked, err := CheckResumeWorkspace(sessionsDir, start.SessionID, currentWorkspace); err != nil {
-		return WorktreeSession{}, err
-	} else if blocked {
-		return WorktreeSession{}, &CrossWorkspaceResumeError{Message: msg}
-	}
 	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
 	if err != nil {
 		return WorktreeSession{}, err
@@ -63,6 +58,9 @@ func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace strin
 	case decision.Session.Path != "":
 		if explicit != "" && explicit != decision.Session.Path {
 			return WorktreeSession{}, &ResumeRejectedError{Reason: fmt.Sprintf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)}
+		}
+		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, decision.Session.Path); err != nil {
+			return WorktreeSession{}, err
 		}
 		return decision.Session, nil
 	case decision.MissingWorktree:
@@ -74,8 +72,20 @@ func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace strin
 		if explicit != "" {
 			return WorktreeSession{}, &ResumeRejectedError{Reason: fmt.Sprintf("session %q has no worktree record; explicit worktree %q rejected", start.SessionID, explicit)}
 		}
+		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, currentWorkspace); err != nil {
+			return WorktreeSession{}, err
+		}
 		return WorktreeSession{}, nil
 	}
+}
+
+func checkResumeWorkspaceAt(sessionsDir, sessionID, workspace string) error {
+	if msg, blocked, err := CheckResumeWorkspace(sessionsDir, sessionID, workspace); err != nil {
+		return err
+	} else if blocked {
+		return &CrossWorkspaceResumeError{Message: msg}
+	}
+	return nil
 }
 
 func CommitStartState(cfg Config, start StartOptions, currentWorkspace string) error {

@@ -988,6 +988,55 @@ func TestRunExecJSONOutput(t *testing.T) {
 	}
 }
 
+func TestRunExecResumeSeededEmptySessionAppendsHistory(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "first round ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	sessionFile := filepath.Join(sessionsDir, "run-1.jsonl")
+	if err := os.WriteFile(sessionFile, nil, 0o600); err != nil {
+		t.Fatalf("seed empty session: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("first round"), opts, nil, true, 0, nil, "run-1", ""); err != nil {
+		t.Fatalf("runExec on seeded empty session: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "run-1" {
+		t.Fatalf("session = %q, want run-1", res.SessionID)
+	}
+	raw, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if !strings.Contains(string(raw), "first round") {
+		t.Fatalf("expected round appended to seeded session, got:\n%s", raw)
+	}
+}
+
 func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := newExecTestServer(t, "round two")
@@ -1192,6 +1241,37 @@ func TestRunExecRejectedResumeDoesNotSaveMode(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sessions", "missing.state.json")); err == nil {
 		t.Fatal("explicit mode must not be saved when pre-checks fail")
+	}
+}
+
+func TestValidateResumeTargetWorktreeSessionFromOriginalWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:         worktreePath,
+		WorktreeName:      "feature",
+		WorktreePath:      worktreePath,
+		WorktreeBranch:    "worktree-feature",
+		OriginalWorkspace: "/tmp/original",
+		OriginalBranch:    "main",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	originalWorkspace := t.TempDir()
+	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
+	if err != nil {
+		t.Fatalf("worktree session resumed from original workspace must pass: %v", err)
+	}
+	if target.Path != worktreePath {
+		t.Fatalf("target path = %q, want %q", target.Path, worktreePath)
 	}
 }
 
