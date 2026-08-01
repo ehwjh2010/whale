@@ -209,11 +209,11 @@ echo "[swebench] running whale in $CHECKOUT_DIR"
     --data-dir "$WHALE_DATA_DIR" \
     --approval-mode never-ask \
     --memory-enabled=false \
-    --session "$RUN_ID" \
-    --mode agent \
     --model "$MODEL" \
     --config "model_reasoning_effort=$EFFORT" \
     exec --json --timeout-sec "$TIMEOUT_SEC" \
+      --session "$RUN_ID" \
+      --mode agent \
     >"$WHALE_STDOUT" 2>"$WHALE_STDERR"
 ) <"$PROMPT_FILE"
 

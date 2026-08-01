@@ -656,6 +656,61 @@ func TestReadExecPromptPrefersArg(t *testing.T) {
 	}
 }
 
+func TestExecHelpShowsSessionAndMode(t *testing.T) {
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	root := newRootCmd(opts)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("exec --help: %v", err)
+	}
+	help := out.String()
+	for _, want := range []string{"--session", "--mode", "agent", "ask", "plan", "overrides the session's saved mode"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("exec --help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestRootHelpHidesSessionAndMode(t *testing.T) {
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	root := newRootCmd(opts)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("root --help: %v", err)
+	}
+	help := out.String()
+	for _, flag := range []string{"--session", "--mode"} {
+		if strings.Contains(help, flag+" ") || strings.Contains(help, flag+"=") {
+			t.Fatalf("root help must not expose %s flag:\n%s", flag, help)
+		}
+	}
+}
+
+func TestExecCombinedArgsParse(t *testing.T) {
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	root := newRootCmd(opts)
+	execCmd, _, err := root.Find([]string{"exec"})
+	if err != nil {
+		t.Fatalf("find exec: %v", err)
+	}
+	args := []string{"--json", "--timeout-sec", "60", "--attach", "a.txt", "--session", "s1", "--mode", "agent", "--model", "deepseek-v4-flash", "--effort", "high", "prompt"}
+	if err := execCmd.ParseFlags(args); err != nil {
+		t.Fatalf("combined args must parse: %v", err)
+	}
+	if got, _ := execCmd.Flags().GetString("session"); got != "s1" {
+		t.Fatalf("session = %q, want s1", got)
+	}
+	if got, _ := execCmd.Flags().GetString("mode"); got != "agent" {
+		t.Fatalf("mode = %q, want agent", got)
+	}
+}
+
 func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	var mu sync.Mutex

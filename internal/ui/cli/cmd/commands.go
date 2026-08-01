@@ -48,8 +48,19 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 	c.Flags().BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON output")
 	c.Flags().IntVar(&timeoutSec, "timeout-sec", 0, "Optional timeout in seconds for this exec run")
 	c.Flags().StringArrayVar(&attachPaths, "attach", nil, "Attach a local file to the prompt")
-	c.Flags().StringVar(&sessionID, "session", "", "Resume an existing session by id")
-	c.Flags().StringVar(&mode, "mode", "", "Run in a specific mode (agent|ask|plan)")
+	c.Flags().StringVar(&sessionID, "session", "", "Resume an existing session by id (default: create a new session)")
+	c.Flags().StringVar(&mode, "mode", "", "Run in a specific mode (agent|ask|plan); overrides the session's saved mode for this run and persists on resume (default: agent for new sessions)")
+	c.Long = `Run a single prompt non-interactively and exit.
+
+Session and mode:
+  --session ID   Resume an existing session so later rounds share its history.
+                 A worktree attached to the session is re-entered; an explicit
+                 --worktree must match the session's record.
+  --mode MODE    Run this round as agent, ask, or plan. When resuming, an
+                 explicit mode overrides the session's saved mode and is saved
+                 for later rounds; without it the saved mode is kept (missing
+                 defaults to agent).
+`
 	return c
 }
 
