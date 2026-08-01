@@ -1270,8 +1270,46 @@ func TestValidateResumeTargetWorktreeSessionFromOriginalWorkspace(t *testing.T) 
 	if err != nil {
 		t.Fatalf("worktree session resumed from original workspace must pass: %v", err)
 	}
-	if target.Path != worktreePath {
-		t.Fatalf("target path = %q, want %q", target.Path, worktreePath)
+	if target.Session.Path != worktreePath {
+		t.Fatalf("target path = %q, want %q", target.Session.Path, worktreePath)
+	}
+}
+
+func TestValidateResumeTargetWorktreeSubdirWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	subdir := filepath.Join(worktreePath, "src")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:         subdir,
+		WorktreeName:      "feature",
+		WorktreePath:      worktreePath,
+		WorktreeBranch:    "worktree-feature",
+		OriginalWorkspace: "/tmp/original",
+		OriginalBranch:    "main",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	originalWorkspace := t.TempDir()
+	decision, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
+	if err != nil {
+		t.Fatalf("worktree session with subdir workspace resumed from original workspace must pass: %v", err)
+	}
+	if decision.Session.Path != worktreePath {
+		t.Fatalf("decision path = %q, want worktree root %q", decision.Session.Path, worktreePath)
+	}
+	if decision.Session.Workspace != subdir {
+		t.Fatalf("decision workspace = %q, want subdir %q", decision.Session.Workspace, subdir)
 	}
 }
 
@@ -1393,8 +1431,8 @@ func TestValidateResumeTargetMissingWorktreeAllowsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing worktree should allow fallback: %v", err)
 	}
-	if target.Path != "" {
-		t.Fatalf("expected empty target for missing worktree, got %+v", target)
+	if target.Session.Path != "" || target.MissingWorktree == false {
+		t.Fatalf("expected missing-worktree decision, got %+v", target)
 	}
 
 	withExplicit := app.StartOptions{

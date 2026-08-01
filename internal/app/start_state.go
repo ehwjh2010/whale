@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/session"
 	"github.com/usewhale/whale/internal/store"
 )
@@ -41,42 +42,53 @@ func IsInvalidModeError(err error) bool {
 	return errors.As(err, &target)
 }
 
-func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace string) (WorktreeSession, error) {
+func ValidateResumeTarget(cfg Config, start StartOptions, currentWorkspace string) (ResumeWorktreeDecision, error) {
 	if start.NewSession || strings.TrimSpace(start.SessionID) == "" {
-		return WorktreeSession{}, nil
+		return ResumeWorktreeDecision{}, nil
 	}
 	sessionsDir := store.DefaultSessionsDir(cfg.DataDir)
 	if _, err := session.ResolveStrictSession(sessionsDir, start.SessionID); err != nil {
-		return WorktreeSession{}, &ResumeRejectedError{Reason: err.Error()}
+		return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: err.Error()}
 	}
 	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
 	if err != nil {
-		return WorktreeSession{}, err
+		return ResumeWorktreeDecision{}, err
 	}
 	explicit := strings.TrimSpace(start.Worktree.Path)
 	switch {
 	case decision.Session.Path != "":
 		if explicit != "" && explicit != decision.Session.Path {
-			return WorktreeSession{}, &ResumeRejectedError{Reason: fmt.Sprintf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)}
+			return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: fmt.Sprintf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)}
 		}
-		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, decision.Session.Path); err != nil {
-			return WorktreeSession{}, err
+		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, resumeTargetWorkspace(decision.Session)); err != nil {
+			return ResumeWorktreeDecision{}, err
 		}
-		return decision.Session, nil
+		return decision, nil
 	case decision.MissingWorktree:
 		if explicit != "" {
-			return WorktreeSession{}, &ResumeRejectedError{Reason: fmt.Sprintf("session worktree is gone; explicit worktree %q cannot take over session ownership", explicit)}
+			return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: fmt.Sprintf("session worktree is gone; explicit worktree %q cannot take over session ownership", explicit)}
 		}
-		return WorktreeSession{}, nil
+		return decision, nil
 	default:
 		if explicit != "" {
-			return WorktreeSession{}, &ResumeRejectedError{Reason: fmt.Sprintf("session %q has no worktree record; explicit worktree %q rejected", start.SessionID, explicit)}
+			return ResumeWorktreeDecision{}, &ResumeRejectedError{Reason: fmt.Sprintf("session %q has no worktree record; explicit worktree %q rejected", start.SessionID, explicit)}
 		}
 		if err := checkResumeWorkspaceAt(sessionsDir, start.SessionID, currentWorkspace); err != nil {
-			return WorktreeSession{}, err
+			return ResumeWorktreeDecision{}, err
 		}
-		return WorktreeSession{}, nil
+		return decision, nil
 	}
+}
+
+func resumeTargetWorkspace(s WorktreeSession) string {
+	ws := strings.TrimSpace(s.Workspace)
+	if ws == "" {
+		return s.Path
+	}
+	if inside, err := core.PathInside(ws, s.Path); err == nil && inside {
+		return ws
+	}
+	return s.Path
 }
 
 func checkResumeWorkspaceAt(sessionsDir, sessionID, workspace string) error {
@@ -88,15 +100,11 @@ func checkResumeWorkspaceAt(sessionsDir, sessionID, workspace string) error {
 	return nil
 }
 
-func CommitStartState(cfg Config, start StartOptions, currentWorkspace string) error {
+func CommitStartState(cfg Config, start StartOptions, currentWorkspace string, decision ResumeWorktreeDecision) error {
 	if start.NewSession || strings.TrimSpace(start.SessionID) == "" {
 		return nil
 	}
 	sessionID := strings.TrimSpace(start.SessionID)
-	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
-	if err != nil {
-		return err
-	}
 	if decision.MissingWorktree {
 		if err := CommitMissingWorktreeCleanup(store.DefaultSessionsDir(cfg.DataDir), sessionID, currentWorkspace); err != nil {
 			return err
