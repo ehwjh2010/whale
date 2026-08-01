@@ -685,7 +685,7 @@ func TestRunExecTextOutput(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil, ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	if got := out.String(); got != "hello from exec\n" {
@@ -717,7 +717,7 @@ func TestRunExecJSONOutput(t *testing.T) {
 	var errOut bytes.Buffer
 	opts := &cliOptions{cfg: app.DefaultConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil, ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var res app.ExecResult
@@ -732,6 +732,153 @@ func TestRunExecJSONOutput(t *testing.T) {
 	}
 	if errOut.Len() != 0 {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "round two")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	first := filepath.Join(sessionsDir, "s1.jsonl")
+	if err := os.WriteFile(first, []byte(`{"SessionID":"s1","Role":"user","Text":"first round"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write first round: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("second round"), opts, nil, true, 0, nil, "s1"); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "s1" {
+		t.Fatalf("session = %q, want s1", res.SessionID)
+	}
+	raw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "first round") || !strings.Contains(content, "second round") {
+		t.Fatalf("expected both rounds appended to same jsonl, got:\n%s", content)
+	}
+}
+
+func TestRunExecResumeUnknownSessionFails(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "never reached")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing"); err == nil {
+		t.Fatal("expected resume of unknown session to fail")
+	}
+}
+
+func TestRunExecResumeKeepsSavedMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"first"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveModeState(sessionsDir, "s1", session.ModePlan); err != nil {
+		t.Fatalf("save mode: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1"); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "s1" {
+		t.Fatalf("session = %q, want s1", res.SessionID)
+	}
+	st, err := session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("saved mode = %q, want plan kept", st.Mode)
+	}
+}
+
+func TestEnterResumeWorktreeMismatchFails(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	recorded := t.TempDir()
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{WorktreePath: recorded}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	start := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	if err := enterResumeWorktree(app.Config{DataDir: dataDir}, start, t.TempDir()); err == nil {
+		t.Fatal("expected explicit worktree mismatch to fail")
 	}
 }
 
@@ -779,7 +926,7 @@ func TestRunExecAttachSendsOpenAICompatibleFilePart(t *testing.T) {
 		BaseURL: srv.URL,
 		Model:   "gpt-4o",
 	}
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}, ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var payload map[string]any

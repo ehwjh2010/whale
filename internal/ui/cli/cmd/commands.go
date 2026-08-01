@@ -22,6 +22,7 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 	var jsonOutput bool
 	var timeoutSec int
 	var attachPaths []string
+	var sessionID string
 	c := &cobra.Command{
 		Use:   "exec [prompt]",
 		Short: "Run a single prompt non-interactively",
@@ -33,12 +34,13 @@ func newExecCmd(opts *cliOptions) *cobra.Command {
 			if err := prepareCLIConfig(cmd, opts); err != nil {
 				return err
 			}
-			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths)
+			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID)
 		},
 	}
 	c.Flags().BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON output")
 	c.Flags().IntVar(&timeoutSec, "timeout-sec", 0, "Optional timeout in seconds for this exec run")
 	c.Flags().StringArrayVar(&attachPaths, "attach", nil, "Attach a local file to the prompt")
+	c.Flags().StringVar(&sessionID, "session", "", "Resume an existing session by id")
 	return c
 }
 
@@ -213,12 +215,25 @@ func doctorBadge(level app.DoctorLevel) string {
 	}
 }
 
-func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string) error {
+func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID string) error {
 	prompt, err := readExecPrompt(in, args)
 	if err != nil {
 		return err
 	}
 	start := app.StartOptions{NewSession: true, Worktree: opts.worktreeSession}
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		start = app.StartOptions{SessionID: sid, Worktree: opts.worktreeSession}
+		currentWorkspace, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get workspace: %w", err)
+		}
+		if err := enterResumeWorktree(opts.cfg, start, currentWorkspace); err != nil {
+			return err
+		}
+		if err := app.CommitStartState(opts.cfg, start, currentWorkspace); err != nil {
+			return err
+		}
+	}
 
 	ctx := context.Background()
 	if timeoutSec > 0 {
@@ -254,6 +269,24 @@ func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, ar
 			}
 		}
 		return ExitError{Code: 1}
+	}
+	return nil
+}
+
+func enterResumeWorktree(cfg app.Config, start app.StartOptions, currentWorkspace string) error {
+	decision, err := app.ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
+	if err != nil {
+		return err
+	}
+	if decision.MissingWorktree || decision.Session.Path == "" {
+		return nil
+	}
+	explicit := strings.TrimSpace(start.Worktree.Path)
+	if explicit != "" && explicit != decision.Session.Path {
+		return fmt.Errorf("explicit worktree %q does not match session record %q", explicit, decision.Session.Path)
+	}
+	if err := os.Chdir(decision.Session.Path); err != nil {
+		return fmt.Errorf("enter resume worktree: %w", err)
 	}
 	return nil
 }
