@@ -1230,13 +1230,18 @@ func TestRunExecResumeRestoresWorktreeContext(t *testing.T) {
 	default:
 		t.Fatal("expected exec request payload")
 	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages = %+v", payload["messages"])
 	}
-	if !strings.Contains(string(raw), "Current worktree root: "+worktreePath) {
-		t.Fatalf("resumed round lost the recorded worktree context; system prompt missing worktree root:\n%s", raw)
+	for _, item := range messages {
+		message, _ := item.(map[string]any)
+		content, _ := message["content"].(string)
+		if strings.Contains(content, "Current worktree root: "+worktreePath) {
+			return
+		}
 	}
+	t.Fatalf("resumed round lost the recorded worktree context: %+v", messages)
 }
 
 func TestRunExecResumeUnknownSessionFails(t *testing.T) {
